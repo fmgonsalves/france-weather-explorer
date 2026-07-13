@@ -18,10 +18,6 @@ wheels/
 # Notebook scratch state
 .ipynb_checkpoints/
 
-# Downloaded and generated weather data
-data/meteo_france/hourly_raw/
-data/meteo_france/hourly_main/
-data/meteo_france/hourly_complementary/
-data/meteo_france/analytics/
-data/meteo_france/metadata/
+# Downloaded, reference, and generated weather data
+data/
 *.duckdb

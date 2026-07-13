@@ -21,11 +21,21 @@ from .meteo_france import (
     select_resources,
     write_manifest,
 )
+from .visualization.dash import run_dashboard
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="weather-analysis")
     commands = parser.add_subparsers(dest="service", required=True)
+    dashboard = commands.add_parser("dashboard", help="Run weather visualization applications")
+    dashboard_apps = dashboard.add_subparsers(dest="dashboard_app", required=True)
+    dash = dashboard_apps.add_parser("dash", help="Run the Plotly Dash dashboard")
+    dash.add_argument(
+        "--analytics-dir", type=Path, default=Path("data/meteo_france/analytics/v1")
+    )
+    dash.add_argument("--host", default="127.0.0.1")
+    dash.add_argument("--port", type=int, default=8050)
+    dash.add_argument("--debug", action="store_true")
     meteo = commands.add_parser("meteo-france", help="Manage Météo-France archives")
     actions = meteo.add_subparsers(dest="action", required=True)
     for action in ("status", "download", "inspect"):
@@ -89,6 +99,15 @@ def _print_overview(category: str, resources, output_dir: Path, inspections) -> 
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.service == "dashboard":
+        if not 1 <= args.port <= 65535:
+            parser.error("--port must be between 1 and 65535")
+        try:
+            run_dashboard(args.analytics_dir, host=args.host, port=args.port, debug=args.debug)
+        except (OSError, ValueError) as error:
+            print(f"Dashboard failed: {error}", file=sys.stderr)
+            return 1
+        return 0
     if args.action == "dataset":
         if args.dataset_action == "rebuild" and args.schema_version != DATASET_VERSION:
             parser.error(f"--schema-version must be {DATASET_VERSION}")

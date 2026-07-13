@@ -155,3 +155,30 @@ Set `TimeZone='UTC'` when displaying `observation_time_utc`; use the persisted
 Available catalog views are `hourly_core`, `hourly_surface`, `hourly_marine`,
 `hourly_snow`, `stations`, `station_metadata_history`, `metrics`, `departments`,
 `source_files`, and `processing_runs`.
+
+## Department 44 dashboard
+
+Run the local Dash application over the analytical DuckDB catalog:
+
+```bash
+uv run weather-analysis dashboard dash
+```
+
+The dashboard defaults to department 44, Nantes-Bouguenais, and the latest
+complete calendar year (2025). It provides station maps, hourly or daily time
+series, coverage diagnostics, quality-code filtering, and CSV export for `T`,
+`TD`, `U`, `RR1`, `FF`, and `PSTAT`. The selected date range is always plotted
+consistently; it does not switch to a different profile when the range exceeds
+one year.
+
+Use a different local address, port, or analytical directory with:
+
+```bash
+uv run weather-analysis dashboard dash \
+  --host 127.0.0.1 \
+  --port 8050 \
+  --analytics-dir data/meteo_france/analytics/v1
+```
+
+The dashboard opens `weather.duckdb` read-only. Restart it after synchronizing
+the analytical dataset so its cached station and metric metadata are refreshed.
