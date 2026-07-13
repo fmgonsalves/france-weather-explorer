@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Operating-system and local Codex files
+.DS_Store
+.agents/
+.codex/
+
+# Notebook scratch state
+.ipynb_checkpoints/
+
+# Downloaded and generated weather data
+data/meteo_france/hourly_raw/
+data/meteo_france/hourly_main/
+data/meteo_france/hourly_complementary/
+data/meteo_france/analytics/
+data/meteo_france/metadata/
+*.duckdb
