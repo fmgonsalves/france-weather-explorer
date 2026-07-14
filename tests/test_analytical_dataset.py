@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -195,3 +196,223 @@ def test_transformation_version_change_requires_explicit_rebuild(tmp_path: Path)
     code, result = dataset.sync_dataset(raw, analytics, reference, "44")
     assert code == 1
     assert result["status"] == "schema-rebuild-required"
+
+
+def test_two_department_sync_preserves_global_metadata(tmp_path: Path):
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2010-2019.csv.gz", [base_row("2010010100")])
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+    write_source(raw / "H_35_2020-2024.csv.gz", [base_row("2020010101")])
+
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    assert dataset.sync_dataset(raw, analytics, reference, "35")[0] == 0
+
+    departments = pq.read_table(analytics / "dimensions/departments.parquet").to_pylist()
+    sources = pq.read_table(analytics / "metadata/source_files.parquet").to_pylist()
+    assert [row["department"] for row in departments] == ["35", "44"]
+    assert [(row["department"], row["filename"]) for row in sources] == [
+        ("35", "H_35_2020-2024.csv.gz"),
+        ("44", "H_44_2010-2019.csv.gz"),
+        ("44", "H_44_2020-2024.csv.gz"),
+    ]
+    connection = duckdb.connect(str(analytics / "weather.duckdb"))
+    assert connection.execute("select distinct department from hourly_core order by 1").fetchall() == [(35,), (44,)]
+    assert connection.execute("select department from departments order by 1").fetchall() == [("35",), ("44",)]
+    assert connection.execute("select department,count(*) from source_files group by 1 order by 1").fetchall() == [
+        ("35", 1), ("44", 2),
+    ]
+    connection.close()
+
+    source_35_before = next(
+        row for row in sources if row["department"] == "35"
+    )
+    write_source(
+        raw / "H_44_2020-2024.csv.gz",
+        [base_row("2020010100"), base_row("2020010102")],
+    )
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    sources_after = pq.read_table(analytics / "metadata/source_files.parquet").to_pylist()
+    assert next(row for row in sources_after if row["department"] == "35") == source_35_before
+    (raw / "H_44_2010-2019.csv.gz").unlink()
+    code, result = dataset.sync_dataset(raw, analytics, reference, "44")
+    assert code == 0, result
+    sources_after_removal = pq.read_table(
+        analytics / "metadata/source_files.parquet"
+    ).to_pylist()
+    assert next(
+        row for row in sources_after_removal if row["department"] == "35"
+    ) == source_35_before
+    assert not any(
+        row["filename"] == "H_44_2010-2019.csv.gz"
+        for row in sources_after_removal
+    )
+
+
+def test_metadata_only_repair_restores_all_manifests_deterministically(tmp_path: Path):
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+    write_source(raw / "H_35_2020-2024.csv.gz", [base_row("2020010101")])
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    assert dataset.sync_dataset(raw, analytics, reference, "35")[0] == 0
+
+    protected = [
+        *raw.glob("*.csv.gz"),
+        *analytics.glob("facts/**/*.parquet"),
+        *analytics.glob("extensions/**/*.parquet"),
+        *analytics.glob("dimensions/stations/**/*.parquet"),
+        *analytics.glob("dimensions/station_metadata_history/**/*.parquet"),
+        *analytics.glob("manifests/*.json"),
+    ]
+    before_hashes = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in protected
+    }
+    department_path = analytics / "dimensions/departments.parquet"
+    source_path = analytics / "metadata/source_files.parquet"
+    pq.write_table(
+        pq.read_table(department_path).filter(dataset.pa.array([True, False])),
+        department_path,
+    )
+    source_table = pq.read_table(source_path)
+    source_mask = dataset.pa.array([
+        value.as_py() == "35" for value in source_table["department"]
+    ])
+    pq.write_table(
+        source_table.filter(source_mask),
+        source_path,
+    )
+    assert dataset.audit_global_metadata(analytics).consistent is False
+
+    result = dataset.repair_global_metadata(analytics)
+    assert result["status"] == "success"
+    assert result["department_count"] == 2
+    assert result["source_file_count"] == 2
+    assert dataset.audit_global_metadata(analytics).consistent is True
+    assert [
+        row["department"]
+        for row in pq.read_table(department_path).to_pylist()
+    ] == ["35", "44"]
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in protected
+    } == before_hashes
+
+    first_departments = department_path.read_bytes()
+    first_sources = source_path.read_bytes()
+    dataset.repair_global_metadata(analytics)
+    assert department_path.read_bytes() == first_departments
+    assert source_path.read_bytes() == first_sources
+
+
+def test_repair_rejects_orphan_partitions_and_rolls_back_refresh_failure(
+    tmp_path: Path, monkeypatch,
+):
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    orphan = analytics / "facts/hourly_core/department=35"
+    orphan.mkdir(parents=True)
+    try:
+        dataset.repair_global_metadata(analytics)
+    except ValueError as error:
+        assert "facts departments differ" in str(error)
+    else:
+        raise AssertionError("orphan facts must prevent metadata repair")
+    orphan.rmdir()
+
+    department_path = analytics / "dimensions/departments.parquet"
+    source_path = analytics / "metadata/source_files.parquet"
+    before = (department_path.read_bytes(), source_path.read_bytes())
+
+    def fail_refresh(_root):
+        raise OSError("catalog locked")
+
+    monkeypatch.setattr(dataset, "refresh_duckdb", fail_refresh)
+    try:
+        dataset.repair_global_metadata(analytics)
+    except OSError as error:
+        assert "catalog locked" in str(error)
+    else:
+        raise AssertionError("refresh failure must fail repair")
+    assert (department_path.read_bytes(), source_path.read_bytes()) == before
+
+
+def test_metadata_audit_rejects_malformed_manifests_and_reports_duplicates(tmp_path: Path):
+    malformed = tmp_path / "malformed"
+    (malformed / "manifests").mkdir(parents=True)
+    (malformed / "manifests/department=44.json").write_text("{bad json")
+    try:
+        dataset.audit_global_metadata(malformed)
+    except ValueError as error:
+        assert "Invalid manifest" in str(error)
+    else:
+        raise AssertionError("malformed manifests must fail metadata audit")
+
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    department_path = analytics / "dimensions/departments.parquet"
+    source_path = analytics / "metadata/source_files.parquet"
+    departments = pq.read_table(department_path)
+    sources = pq.read_table(source_path)
+    pq.write_table(dataset.pa.concat_tables([departments, departments]), department_path)
+    pq.write_table(dataset.pa.concat_tables([sources, sources]), source_path)
+    audit = dataset.audit_global_metadata(analytics)
+    assert audit.consistent is False
+    assert any("duplicate department" in issue for issue in audit.issues)
+    assert any("duplicate department/filename" in issue for issue in audit.issues)
+
+
+def test_sync_progress_reports_stages_archives_and_rows(tmp_path: Path):
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+
+    class Recorder:
+        def __init__(self):
+            self.events = []
+
+        def stage(self, name): self.events.append(("stage", name))
+        def sources_started(self, total): self.events.append(("sources", total))
+        def source_started(self, filename): self.events.append(("source", filename))
+        def rows_processed(self, count): self.events.append(("rows", count))
+        def source_finished(self): self.events.append(("finished",))
+        def close(self): self.events.append(("close",))
+
+    recorder = Recorder()
+    assert dataset.sync_dataset(
+        raw, analytics, reference, "44", progress=recorder
+    )[0] == 0
+    stages = [event[1] for event in recorder.events if event[0] == "stage"]
+    assert stages == [
+        "planning", "source processing", "compaction", "validation", "dimensions",
+        "metadata", "promotion", "manifest", "DuckDB refresh",
+    ]
+    assert ("sources", 1) in recorder.events
+    assert ("rows", 1) in recorder.events
+    assert recorder.events[-1] == ("close",)
+
+
+def test_global_dataset_status_summarizes_materialized_and_raw_only_departments(tmp_path: Path):
+    raw, analytics, reference = tmp_path / "raw", tmp_path / "analytics", tmp_path / "reference"
+    raw.mkdir()
+    reference_dictionary(reference)
+    write_source(raw / "H_44_2020-2024.csv.gz", [base_row("2020010100")])
+    write_source(raw / "H_35_2020-2024.csv.gz", [base_row("2020010101")])
+    write_source(raw / "H_75_2020-2024.csv.gz", [base_row("2020010102")])
+    assert dataset.sync_dataset(raw, analytics, reference, "44")[0] == 0
+    assert dataset.sync_dataset(raw, analytics, reference, "35")[0] == 0
+
+    summary = dataset.summarize_dataset_status(raw, analytics)
+    assert [row["department"] for row in summary["departments"]] == ["35", "44"]
+    assert {row["status"] for row in summary["departments"]} == {"up-to-date"}
+    assert summary["raw_only_departments"] == ("75",)
+    assert summary["fact_departments"] == 2
+    assert summary["station_departments"] == 2

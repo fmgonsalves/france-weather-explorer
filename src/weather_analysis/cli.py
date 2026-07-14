@@ -6,9 +6,18 @@ from collections import Counter
 from pathlib import Path
 
 import requests
+from tqdm import tqdm
 
 from .archive_inspection import run_inspection
-from .analytical_dataset import DATASET_VERSION, plan_sync, sync_dataset
+from .analytical_dataset import (
+    DATASET_VERSION,
+    NullProgressReporter,
+    audit_global_metadata,
+    plan_sync,
+    repair_global_metadata,
+    summarize_dataset_status,
+    sync_dataset,
+)
 from .department_exploration import run_department_exploration
 from .meteo_france import (
     FileStatus,
@@ -22,6 +31,51 @@ from .meteo_france import (
     write_manifest,
 )
 from .visualization.dash import run_dashboard
+
+
+class TqdmProgressReporter:
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.interactive = enabled and sys.stderr.isatty()
+        self.source_bar = None
+        self.row_bar = None
+
+    def stage(self, name: str) -> None:
+        if not self.enabled:
+            return
+        if name != "source processing":
+            self._close_bars()
+        message = f"[dataset] {name}"
+        tqdm.write(message, file=sys.stderr) if self.interactive else print(message, file=sys.stderr)
+
+    def sources_started(self, total: int) -> None:
+        if not self.interactive:
+            return
+        self.source_bar = tqdm(total=total, desc="Archives", unit="archive", position=0)
+        self.row_bar = tqdm(desc="Rows", unit="row", unit_scale=True, position=1)
+
+    def source_started(self, filename: str) -> None:
+        if self.source_bar is not None:
+            self.source_bar.set_postfix_str(filename)
+
+    def rows_processed(self, count: int) -> None:
+        if self.row_bar is not None:
+            self.row_bar.update(count)
+
+    def source_finished(self) -> None:
+        if self.source_bar is not None:
+            self.source_bar.update(1)
+
+    def close(self) -> None:
+        self._close_bars()
+
+    def _close_bars(self) -> None:
+        if self.row_bar is not None:
+            self.row_bar.close()
+            self.row_bar = None
+        if self.source_bar is not None:
+            self.source_bar.close()
+            self.source_bar = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_actions = dataset.add_subparsers(dest="dataset_action", required=True)
     for dataset_action in ("status", "sync", "rebuild"):
         command = dataset_actions.add_parser(dataset_action)
-        command.add_argument("--department", required=True)
+        command.add_argument("--department", required=dataset_action != "status")
         command.add_argument(
             "--raw-dir", type=Path, default=Path("data/meteo_france/hourly_raw")
         )
@@ -69,6 +123,23 @@ def build_parser() -> argparse.ArgumentParser:
         )
         if dataset_action == "rebuild":
             command.add_argument("--schema-version", type=int, required=True)
+        if dataset_action == "status":
+            command.add_argument(
+                "--verbose", action="store_true",
+                help="Show complete expected and observed metadata department lists",
+            )
+            command.add_argument(
+                "--include-unmaterialized", action="store_true",
+                help="List downloaded departments without an analytical dataset",
+            )
+        if dataset_action in {"sync", "rebuild"}:
+            command.add_argument("--no-progress", action="store_true")
+    repair = dataset_actions.add_parser(
+        "repair-metadata", help="Rebuild shared metadata from department manifests"
+    )
+    repair.add_argument(
+        "--analytics-dir", type=Path, default=Path("data/meteo_france/analytics/v1")
+    )
     return parser
 
 
@@ -96,6 +167,88 @@ def _print_overview(category: str, resources, output_dir: Path, inspections) -> 
     print(f"redundant partial files: {redundant:,}")
 
 
+def _print_metadata_audit(audit, verbose: bool = False) -> None:
+    print(
+        "Shared catalog metadata: "
+        f"{'consistent' if audit.consistent else 'inconsistent'}"
+    )
+    print(
+        "Metadata departments: "
+        f"expected={len(audit.expected_departments):,}; "
+        f"observed={len(audit.observed_departments):,}"
+    )
+    print(
+        "Metadata source archives: "
+        f"expected={audit.expected_source_files:,}; "
+        f"observed={audit.observed_source_files:,}"
+    )
+    expected_departments = set(audit.expected_departments)
+    observed_departments = set(audit.observed_departments)
+    missing_departments = sorted(expected_departments - observed_departments)
+    unexpected_departments = sorted(observed_departments - expected_departments)
+    if missing_departments:
+        print(f"Missing metadata departments: {','.join(missing_departments)}")
+    if unexpected_departments:
+        print(f"Unexpected metadata departments: {','.join(unexpected_departments)}")
+    if verbose:
+        print(
+            "Expected metadata department list: "
+            f"{','.join(audit.expected_departments) or 'none'}"
+        )
+        print(
+            "Observed metadata department list: "
+            f"{','.join(audit.observed_departments) or 'none'}"
+        )
+    for issue in (*audit.structural_issues, *audit.issues):
+        print(f"Metadata issue: {issue}")
+
+
+def _year_summary(years) -> str:
+    if not years:
+        return "none"
+    return str(years[0]) if len(years) == 1 else f"{years[0]}–{years[-1]}"
+
+
+def _print_global_dataset_status(summary: dict, verbose: bool, include_raw: bool) -> int:
+    rows = summary["departments"]
+    counts = Counter(row["status"] for row in rows)
+    print(f"Analytical dataset v{DATASET_VERSION}")
+    print(f"Materialized departments: {len(rows):,}")
+    print(f"Departments up-to-date: {counts['up-to-date']:,}")
+    print(f"Departments with pending changes: {counts['pending']:,}")
+    print(f"Departments requiring rebuild: {counts['rebuild']:,}")
+    print(f"Departments with errors: {counts['error']:,}")
+    print()
+    _print_metadata_audit(summary["audit"], verbose=verbose)
+    print(f"Fact departments: {summary['fact_departments']:,}")
+    print(f"Station-dimension departments: {summary['station_departments']:,}")
+    print(f"Failed processing runs: {summary['failed_runs']:,}")
+    raw_only = summary["raw_only_departments"]
+    print(f"Raw-only departments: {len(raw_only):,}")
+
+    displayed = rows if verbose else [row for row in rows if row["status"] != "up-to-date"]
+    if displayed:
+        print("\nMaterialized department details:")
+        for row in displayed:
+            details = (
+                f"{row['department']}  {row['status']}  "
+                f"archives={row['source_archives']:,}  "
+                f"changed={row['changed_archives']:,}  removed={row['removed_archives']:,}  "
+                f"years={_year_summary(row['affected_years'])}"
+            )
+            print(details)
+            if row["error"]:
+                print(f"  Error: {row['error']}")
+    if include_raw and raw_only:
+        print(f"\nRaw-only department list: {','.join(raw_only)}")
+    unhealthy = (
+        not summary["audit"].consistent
+        or counts["rebuild"] > 0
+        or counts["error"] > 0
+    )
+    return 1 if unhealthy else 0
+
+
 def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -109,11 +262,33 @@ def run(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.action == "dataset":
+        if args.dataset_action == "repair-metadata":
+            try:
+                result = repair_global_metadata(args.analytics_dir)
+            except (OSError, ValueError) as error:
+                print(f"Metadata repair failed: {error}", file=sys.stderr)
+                return 1
+            print(f"Metadata repair: {result['status']}")
+            print(f"Departments: {result['department_count']:,}")
+            print(f"Source archives: {result['source_file_count']:,}")
+            print(f"Report: {Path(result['report_path']).resolve()}")
+            return 0
         if args.dataset_action == "rebuild" and args.schema_version != DATASET_VERSION:
             parser.error(f"--schema-version must be {DATASET_VERSION}")
         if args.dataset_action == "status":
+            if args.department is None:
+                try:
+                    summary = summarize_dataset_status(args.raw_dir, args.analytics_dir)
+                except (OSError, ValueError) as error:
+                    print(f"Dataset status failed: {error}", file=sys.stderr)
+                    return 1
+                return _print_global_dataset_status(
+                    summary, verbose=args.verbose,
+                    include_raw=args.include_unmaterialized,
+                )
             try:
                 plan = plan_sync(args.raw_dir, args.analytics_dir, args.department)
+                audit = audit_global_metadata(args.analytics_dir)
             except (OSError, ValueError) as error:
                 print(f"Dataset status failed: {error}", file=sys.stderr)
                 return 1
@@ -123,14 +298,19 @@ def run(argv: list[str] | None = None) -> int:
             print(f"Removed archives: {len(plan.removed_files):,}")
             print(f"Affected years: {len(plan.affected_years):,}")
             print(f"Schema rebuild required: {plan.schema_rebuild_required}")
+            _print_metadata_audit(audit, verbose=args.verbose)
             print(f"Status: {'up-to-date' if plan.no_op else 'pending'}")
-            return 1 if plan.schema_rebuild_required else 0
+            return 1 if plan.schema_rebuild_required or not audit.consistent else 0
+        reporter = (
+            NullProgressReporter() if args.no_progress else TqdmProgressReporter()
+        )
         code, result = sync_dataset(
             raw_root=args.raw_dir,
             analytics_root=args.analytics_dir,
             reference_root=args.reference_dir,
             department=args.department,
             rebuild=args.dataset_action == "rebuild",
+            progress=reporter,
         )
         print(f"Dataset status: {result['status']}")
         if "counts" in result:

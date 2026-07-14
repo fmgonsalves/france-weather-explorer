@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -209,6 +209,49 @@ class SyncPlan:
     no_op: bool
 
 
+class ProgressReporter(Protocol):
+    def stage(self, name: str) -> None: ...
+    def sources_started(self, total: int) -> None: ...
+    def source_started(self, filename: str) -> None: ...
+    def rows_processed(self, count: int) -> None: ...
+    def source_finished(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class NullProgressReporter:
+    def stage(self, name: str) -> None:
+        pass
+
+    def sources_started(self, total: int) -> None:
+        pass
+
+    def source_started(self, filename: str) -> None:
+        pass
+
+    def rows_processed(self, count: int) -> None:
+        pass
+
+    def source_finished(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass(frozen=True)
+class MetadataAudit:
+    expected_departments: tuple[str, ...]
+    observed_departments: tuple[str, ...]
+    expected_source_files: int
+    observed_source_files: int
+    issues: tuple[str, ...]
+    structural_issues: tuple[str, ...]
+
+    @property
+    def consistent(self) -> bool:
+        return not self.issues and not self.structural_issues
+
+
 def is_metropolitan(department: str) -> bool:
     if department in {"2A", "2B"}:
         return True
@@ -227,6 +270,206 @@ def _load_manifest(path: Path) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _validated_manifests(analytics_root: Path) -> dict[str, dict]:
+    manifests: dict[str, dict] = {}
+    for path in sorted((analytics_root / "manifests").glob("department=*.json")):
+        department = path.stem.split("=", 1)[1].upper()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid manifest {path.name}: {error}") from error
+        if payload.get("department", "").upper() != department:
+            raise ValueError(f"Manifest department mismatch in {path.name}")
+        if not is_metropolitan(department):
+            raise ValueError(f"Unsupported manifest department: {department}")
+        source_files = payload.get("source_files")
+        if not isinstance(source_files, dict):
+            raise ValueError(f"Manifest {path.name} has no source_files mapping")
+        for filename, row in source_files.items():
+            if not isinstance(row, dict) or row.get("filename") != filename:
+                raise ValueError(f"Invalid source record {filename!r} in {path.name}")
+            required = {
+                "filename", "department", "period_start", "period_end",
+                "size", "mtime_ns", "sha256",
+            }
+            if not required.issubset(row):
+                raise ValueError(f"Incomplete source record {filename!r} in {path.name}")
+            if str(row["department"]).upper() != department:
+                raise ValueError(f"Source department mismatch for {filename!r} in {path.name}")
+        manifests[department] = payload
+    return manifests
+
+
+def _plan_manifest(plan: SyncPlan) -> dict:
+    return {
+        "department": plan.department,
+        "network_category": "main",
+        "source_files": {item.path.name: item.manifest_row() for item in plan.sources},
+    }
+
+
+def _metadata_rows(
+    analytics_root: Path, current_plan: SyncPlan | None = None
+) -> tuple[list[dict], list[dict]]:
+    manifests = _validated_manifests(analytics_root)
+    if current_plan is not None:
+        manifests[current_plan.department] = _plan_manifest(current_plan)
+    departments = []
+    sources = []
+    seen_sources: set[tuple[str, str]] = set()
+    for department, manifest in sorted(manifests.items()):
+        departments.append({
+            "department": department,
+            "department_name": DEPARTMENT_NAMES.get(department, f"Département {department}"),
+            "source_time_convention": "UTC",
+            "analytical_timezone": "Europe/Paris",
+            "geography_class": "metropolitan",
+        })
+        network_category = manifest.get("network_category", "main")
+        for filename, source in sorted(manifest["source_files"].items()):
+            key = (department, filename)
+            if key in seen_sources:
+                raise ValueError(f"Duplicate source metadata key: {department}/{filename}")
+            seen_sources.add(key)
+            sources.append({
+                "filename": filename,
+                "department": department,
+                "period_start": int(source["period_start"]),
+                "period_end": int(source["period_end"]),
+                "size": int(source["size"]),
+                "mtime_ns": int(source["mtime_ns"]),
+                "sha256": str(source["sha256"]),
+                "network_category": network_category,
+            })
+    return departments, sources
+
+
+def _partition_departments(root: Path) -> set[str]:
+    if not root.exists():
+        return set()
+    return {
+        path.name.split("=", 1)[1].upper()
+        for path in root.glob("department=*") if path.is_dir()
+    }
+
+
+def audit_global_metadata(analytics_root: Path) -> MetadataAudit:
+    manifests = _validated_manifests(analytics_root)
+    expected = set(manifests)
+    structural_issues = []
+    partition_roots = {
+        "facts": analytics_root / "facts/hourly_core",
+        "stations": analytics_root / "dimensions/stations",
+        "station history": analytics_root / "dimensions/station_metadata_history",
+    }
+    for label, root in partition_roots.items():
+        observed = _partition_departments(root)
+        if observed != expected:
+            structural_issues.append(
+                f"{label} departments differ from manifests: "
+                f"missing={sorted(expected - observed)}, unexpected={sorted(observed - expected)}"
+            )
+
+    expected_source_count = sum(len(item["source_files"]) for item in manifests.values())
+    department_path = analytics_root / "dimensions/departments.parquet"
+    source_path = analytics_root / "metadata/source_files.parquet"
+    observed_departments: list[str] = []
+    observed_sources: list[dict] = []
+    issues = []
+    try:
+        if department_path.exists():
+            observed_departments = [
+                str(row["department"]).upper()
+                for row in pq.read_table(department_path).to_pylist()
+            ]
+        if source_path.exists():
+            observed_sources = pq.read_table(source_path).to_pylist()
+    except (OSError, pa.ArrowException) as error:
+        issues.append(f"Global metadata cannot be read: {error}")
+
+    observed_set = set(observed_departments)
+    if observed_set != expected:
+        issues.append(
+            "departments metadata differs from manifests: "
+            f"missing={sorted(expected - observed_set)}, unexpected={sorted(observed_set - expected)}"
+        )
+    if len(observed_departments) != len(observed_set):
+        issues.append("departments metadata contains duplicate department rows")
+    source_keys = [
+        (str(row.get("department", "")).upper(), str(row.get("filename", "")))
+        for row in observed_sources
+    ]
+    expected_keys = {
+        (department, filename)
+        for department, manifest in manifests.items()
+        for filename in manifest["source_files"]
+    }
+    observed_keys = set(source_keys)
+    if observed_keys != expected_keys:
+        issues.append(
+            "source_files metadata differs from manifests: "
+            f"missing={len(expected_keys - observed_keys)}, unexpected={len(observed_keys - expected_keys)}"
+        )
+    if len(source_keys) != len(observed_keys):
+        issues.append("source_files metadata contains duplicate department/filename rows")
+    return MetadataAudit(
+        expected_departments=tuple(sorted(expected)),
+        observed_departments=tuple(sorted(observed_set)),
+        expected_source_files=expected_source_count,
+        observed_source_files=len(observed_sources),
+        issues=tuple(issues), structural_issues=tuple(structural_issues),
+    )
+
+
+def summarize_dataset_status(raw_root: Path, analytics_root: Path) -> dict:
+    manifests = _validated_manifests(analytics_root)
+    department_rows = []
+    for department in sorted(manifests):
+        try:
+            plan = plan_sync(raw_root, analytics_root, department)
+            status = (
+                "rebuild" if plan.schema_rebuild_required
+                else "up-to-date" if plan.no_op
+                else "pending"
+            )
+            department_rows.append({
+                "department": department,
+                "status": status,
+                "source_archives": len(plan.sources),
+                "changed_archives": len(plan.changed_files),
+                "removed_archives": len(plan.removed_files),
+                "affected_years": plan.affected_years,
+                "error": None,
+            })
+        except (OSError, ValueError) as error:
+            department_rows.append({
+                "department": department,
+                "status": "error",
+                "source_archives": 0,
+                "changed_archives": 0,
+                "removed_archives": 0,
+                "affected_years": (),
+                "error": str(error),
+            })
+
+    raw_departments = set()
+    for path in raw_root.glob("H_*.csv.gz"):
+        match = SOURCE_PATTERN.fullmatch(path.name)
+        if match:
+            raw_departments.add(match.group("department").upper())
+    audit = audit_global_metadata(analytics_root)
+    return {
+        "departments": department_rows,
+        "audit": audit,
+        "raw_only_departments": tuple(sorted(raw_departments - set(manifests))),
+        "fact_departments": len(_partition_departments(analytics_root / "facts/hourly_core")),
+        "station_departments": len(
+            _partition_departments(analytics_root / "dimensions/stations")
+        ),
+        "failed_runs": len(list((analytics_root / "metadata/failures").glob("*.json"))),
+    }
 
 
 def discover_sources(raw_root: Path, department: str, previous: dict | None = None) -> tuple[SourceFile, ...]:
@@ -366,7 +609,9 @@ def _has_payload(row: list[str], indexes: dict[str, int], base_columns: Iterable
     return any(name in indexes and row[indexes[name]] != "" for name in base_columns)
 
 
-def process_sources(plan: SyncPlan, stage_root: Path, run_id: str) -> dict:
+def process_sources(
+    plan: SyncPlan, stage_root: Path, run_id: str, progress: ProgressReporter
+) -> dict:
     affected = set(plan.affected_years)
     writer = ChunkWriter(stage_root / "data")
     buffers: dict[tuple[str, int], list[dict]] = {}
@@ -374,9 +619,14 @@ def process_sources(plan: SyncPlan, stage_root: Path, run_id: str) -> dict:
     core_rows = 0
     extension_rows = {name: 0 for name in TABLE_BASES if name != "hourly_core"}
     processed_files = []
-    for source in plan.sources:
-        if not affected.intersection(range(source.period_start, source.period_end + 1)):
-            continue
+    selected_sources = [
+        source for source in plan.sources
+        if affected.intersection(range(source.period_start, source.period_end + 1))
+    ]
+    progress.sources_started(len(selected_sources))
+    for source in selected_sources:
+        progress.source_started(source.path.name)
+        pending_progress = 0
         encoding, delimiter = detect_encoding_and_delimiter(source.path)
         with gzip.open(source.path, "rb") as binary:
             reader = csv.reader(io.TextIOWrapper(binary, encoding=encoding, newline=""), delimiter=delimiter)
@@ -413,10 +663,17 @@ def process_sources(plan: SyncPlan, stage_root: Path, run_id: str) -> dict:
                     if len(buffers[buffer_key]) >= BATCH_ROWS:
                         writer.write(buffer_key[0], buffer_key[1], buffers[buffer_key])
                         buffers[buffer_key].clear()
+                pending_progress += 1
+                if pending_progress >= 1_000:
+                    progress.rows_processed(pending_progress)
+                    pending_progress = 0
         for buffer_key in list(buffers):
             if buffers[buffer_key]:
                 writer.write(buffer_key[0], buffer_key[1], buffers[buffer_key])
                 buffers[buffer_key].clear()
+        if pending_progress:
+            progress.rows_processed(pending_progress)
+        progress.source_finished()
     return {
         "source_rows": source_rows, "core_rows": core_rows,
         "extension_rows": extension_rows, "processed_files": processed_files,
@@ -454,8 +711,10 @@ def _sql_paths(paths: list[Path]) -> str:
 
 def validate_stage(stage_root: Path, department: str, expected_rows: int) -> dict:
     paths = sorted((stage_root / "data" / "hourly_core" / f"department={department}").glob("year=*/*.parquet"))
-    if not paths and expected_rows:
-        raise ValueError("No staged hourly_core Parquet files were written")
+    if not paths:
+        if expected_rows:
+            raise ValueError("No staged hourly_core Parquet files were written")
+        return {"actual_rows": 0, "years": []}
     connection = duckdb.connect()
     path_sql = _sql_paths(paths)
     actual = connection.execute(f"SELECT count(*) FROM read_parquet({path_sql})").fetchone()[0]
@@ -545,7 +804,7 @@ def _official_unit(description: str | None) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def build_static_dimensions(stage_root: Path, reference_root: Path, department: str) -> None:
+def build_static_dimensions(stage_root: Path, reference_root: Path) -> None:
     official = parse_official_dictionary(reference_root / "H_descriptif_champs.csv")
     metric_rows = []
     for table_name, metrics in TABLE_METRICS.items():
@@ -580,26 +839,53 @@ def build_static_dimensions(stage_root: Path, reference_root: Path, department: 
     metadata = {b"dataset_version": b"1", b"transformation_version": TRANSFORMATION_VERSION.encode()}
     metrics = pa.Table.from_pylist(metric_rows).replace_schema_metadata(metadata)
     pq.write_table(metrics, dimensions / "metrics.parquet", compression="zstd")
-    department_row = [{
-        "department": department,
-        "department_name": DEPARTMENT_NAMES.get(department, f"Département {department}"),
-        "source_time_convention": "UTC",
-        "analytical_timezone": "Europe/Paris",
-        "geography_class": "metropolitan",
-    }]
+
+
+def build_global_metadata(
+    analytics_root: Path, stage_root: Path, current_plan: SyncPlan | None = None
+) -> tuple[int, int]:
+    department_rows, source_rows = _metadata_rows(analytics_root, current_plan)
+    metadata = {
+        b"dataset_version": str(DATASET_VERSION).encode(),
+        b"transformation_version": TRANSFORMATION_VERSION.encode(),
+    }
+    department_schema = pa.schema([
+        pa.field("department", pa.string()),
+        pa.field("department_name", pa.string()),
+        pa.field("source_time_convention", pa.string()),
+        pa.field("analytical_timezone", pa.string()),
+        pa.field("geography_class", pa.string()),
+    ], metadata=metadata)
+    source_schema = pa.schema([
+        pa.field("filename", pa.string()),
+        pa.field("department", pa.string()),
+        pa.field("period_start", pa.int64()),
+        pa.field("period_end", pa.int64()),
+        pa.field("size", pa.int64()),
+        pa.field("mtime_ns", pa.int64()),
+        pa.field("sha256", pa.string()),
+        pa.field("network_category", pa.string()),
+    ])
+    dimensions = stage_root / "dimensions"
+    metadata_root = stage_root / "metadata"
+    dimensions.mkdir(parents=True, exist_ok=True)
+    metadata_root.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.Table.from_pylist(department_row).replace_schema_metadata(metadata),
+        pa.Table.from_pylist(department_rows, schema=department_schema),
         dimensions / "departments.parquet", compression="zstd",
     )
+    pq.write_table(
+        pa.Table.from_pylist(source_rows, schema=source_schema),
+        metadata_root / "source_files.parquet", compression="zstd",
+    )
+    return len(department_rows), len(source_rows)
 
 
 def build_metadata_tables(
-    analytics_root: Path, stage_root: Path, plan: SyncPlan, run_row: dict
+    analytics_root: Path, stage_root: Path, run_row: dict
 ) -> None:
     metadata_root = stage_root / "metadata"
     metadata_root.mkdir(parents=True, exist_ok=True)
-    source_rows = [item.manifest_row() | {"network_category": "main"} for item in plan.sources]
-    pq.write_table(pa.Table.from_pylist(source_rows), metadata_root / "source_files.parquet", compression="zstd")
     previous_path = analytics_root / "metadata" / "processing_runs.parquet"
     rows = pq.read_table(previous_path).to_pylist() if previous_path.exists() else []
     rows.append(run_row)
@@ -644,9 +930,9 @@ def promote(stage_root: Path, analytics_root: Path, department: str, affected: s
             if final.exists():
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 final.replace(backup)
+            promoted.append((final, backup if backup.exists() else None))
             final.parent.mkdir(parents=True, exist_ok=True)
             staged.replace(final)
-            promoted.append((final, backup if backup.exists() else None))
         for relative in (
             Path("dimensions/metrics.parquet"), Path("dimensions/departments.parquet"),
             Path("metadata/source_files.parquet"), Path("metadata/processing_runs.parquet"),
@@ -657,9 +943,9 @@ def promote(stage_root: Path, analytics_root: Path, department: str, affected: s
             if final.exists():
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 final.replace(backup)
+            promoted.append((final, backup if backup.exists() else None))
             final.parent.mkdir(parents=True, exist_ok=True)
             staged.replace(final)
-            promoted.append((final, backup if backup.exists() else None))
     except Exception:
         for final, backup in reversed(promoted):
             if final.exists():
@@ -748,27 +1034,125 @@ def refresh_duckdb(analytics_root: Path) -> None:
     connection.close()
 
 
+def _validate_staged_global_metadata(
+    analytics_root: Path, stage_root: Path
+) -> tuple[int, int]:
+    expected_departments, expected_sources = _metadata_rows(analytics_root)
+    department_rows = pq.read_table(stage_root / "dimensions/departments.parquet").to_pylist()
+    source_rows = pq.read_table(stage_root / "metadata/source_files.parquet").to_pylist()
+    expected_department_codes = [row["department"] for row in expected_departments]
+    actual_department_codes = [row["department"] for row in department_rows]
+    if actual_department_codes != expected_department_codes:
+        raise ValueError("Staged department metadata does not match manifests")
+    expected_keys = [(row["department"], row["filename"]) for row in expected_sources]
+    actual_keys = [(row["department"], row["filename"]) for row in source_rows]
+    if actual_keys != expected_keys or len(actual_keys) != len(set(actual_keys)):
+        raise ValueError("Staged source metadata does not match manifests")
+    return len(department_rows), len(source_rows)
+
+
+def _promote_global_metadata(stage_root: Path, analytics_root: Path) -> None:
+    relative_paths = (
+        Path("dimensions/departments.parquet"),
+        Path("metadata/source_files.parquet"),
+    )
+    backup_root = stage_root / "backup"
+    promoted: list[tuple[Path, Path | None]] = []
+    try:
+        for relative in relative_paths:
+            final = analytics_root / relative
+            staged = stage_root / relative
+            backup = backup_root / relative
+            if final.exists():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                final.replace(backup)
+            promoted.append((final, backup if backup.exists() else None))
+            final.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(final)
+        refresh_duckdb(analytics_root)
+    except Exception:
+        for final, backup in reversed(promoted):
+            if final.exists():
+                final.unlink()
+            if backup and backup.exists():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                backup.replace(final)
+        try:
+            refresh_duckdb(analytics_root)
+        except Exception:
+            pass
+        raise
+
+
+def repair_global_metadata(analytics_root: Path) -> dict:
+    before = audit_global_metadata(analytics_root)
+    if before.structural_issues:
+        raise ValueError("; ".join(before.structural_issues))
+    repair_id = str(uuid.uuid4())
+    stage_root = analytics_root / "staging" / f"metadata-repair-{repair_id}"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    try:
+        build_global_metadata(analytics_root, stage_root)
+        department_count, source_count = _validate_staged_global_metadata(
+            analytics_root, stage_root
+        )
+        _promote_global_metadata(stage_root, analytics_root)
+        after = audit_global_metadata(analytics_root)
+        if not after.consistent:
+            raise ValueError("Metadata remained inconsistent after repair")
+        report = {
+            "repair_id": repair_id,
+            "repaired_at": datetime.now(timezone.utc).isoformat(),
+            "departments": list(after.expected_departments),
+            "department_count": department_count,
+            "source_file_count": source_count,
+            "issues_before": list(before.issues),
+            "status": "success",
+        }
+        report_root = analytics_root / "metadata/repairs"
+        report_root.mkdir(parents=True, exist_ok=True)
+        report_path = report_root / f"{repair_id}.json"
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report | {"report_path": str(report_path)}
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
+
+
 def sync_dataset(
     raw_root: Path, analytics_root: Path, reference_root: Path, department: str,
-    rebuild: bool = False,
+    rebuild: bool = False, progress: ProgressReporter | None = None,
 ) -> tuple[int, dict]:
-    plan = plan_sync(raw_root, analytics_root, department, rebuild=rebuild)
+    reporter = progress or NullProgressReporter()
+    reporter.stage("planning")
+    try:
+        plan = plan_sync(raw_root, analytics_root, department, rebuild=rebuild)
+    except Exception:
+        reporter.close()
+        raise
     if plan.schema_rebuild_required and not rebuild:
+        reporter.close()
         return 1, {"status": "schema-rebuild-required", "plan": plan}
     if plan.no_op:
+        reporter.close()
         return 0, {"status": "up-to-date", "plan": plan}
     run_id = str(uuid.uuid4())
     started = datetime.now(timezone.utc)
     stage_root = analytics_root / "staging" / run_id
     stage_root.mkdir(parents=True, exist_ok=True)
     try:
-        counts = process_sources(plan, stage_root, run_id)
+        reporter.stage("source processing")
+        counts = process_sources(plan, stage_root, run_id, reporter)
+        reporter.stage("compaction")
         compact_stage(stage_root, plan.department)
+        reporter.stage("validation")
         validation = validate_stage(stage_root, plan.department, counts["source_rows"])
+        reporter.stage("dimensions")
         build_station_dimensions(
             analytics_root, stage_root, plan.department, set(plan.affected_years)
         )
-        build_static_dimensions(stage_root, reference_root, plan.department)
+        build_static_dimensions(stage_root, reference_root)
+        reporter.stage("metadata")
+        build_global_metadata(analytics_root, stage_root, plan)
         finished = datetime.now(timezone.utc)
         run_row = {
             "processing_run_id": run_id, "department": plan.department,
@@ -778,13 +1162,16 @@ def sync_dataset(
             "affected_years": json.dumps(plan.affected_years),
             "source_rows": counts["source_rows"], "core_rows": counts["core_rows"],
         }
-        build_metadata_tables(analytics_root, stage_root, plan, run_row)
+        build_metadata_tables(analytics_root, stage_root, run_row)
+        reporter.stage("promotion")
         promote(stage_root, analytics_root, plan.department, set(plan.affected_years))
         all_years = sorted({
             int(path.name.split("=", 1)[1])
             for path in (analytics_root / "facts/hourly_core" / f"department={plan.department}").glob("year=*")
         })
+        reporter.stage("manifest")
         write_manifest(analytics_root, plan, run_id, all_years, counts)
+        reporter.stage("DuckDB refresh")
         refresh_duckdb(analytics_root)
         shutil.rmtree(stage_root, ignore_errors=True)
         return 0, {"status": "synchronized", "plan": plan, "counts": counts, "validation": validation, "run_id": run_id}
@@ -799,3 +1186,5 @@ def sync_dataset(
         }, indent=2), encoding="utf-8")
         shutil.rmtree(stage_root, ignore_errors=True)
         return 1, {"status": "failed", "error": str(error), "plan": plan, "run_id": run_id}
+    finally:
+        reporter.close()

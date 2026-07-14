@@ -45,6 +45,13 @@ when that header is unavailable). Catalog/server discrepancies are reported
 without rejecting an otherwise valid download. Neither command extracts
 archive contents.
 
+> **Current update-detection limitation:** archive freshness is determined by
+> byte size. If Météo-France replaces a remote archive with different contents
+> but exactly the same size, the existing local file will still be classified
+> as complete and will not be downloaded again. Reliable recurring refreshes
+> should add an ETag, `Last-Modified`, checksum, or explicit forced-refresh
+> mechanism.
+
 When a local size differs from the catalog, `status` uses a read-only HTTP
 `HEAD` request to verify it against the storage server. `download` removes a
 redundant `.part` copy only after the corresponding final archive is verified.
@@ -100,12 +107,47 @@ Preview local source changes without writing:
 uv run weather-analysis meteo-france dataset status --department 44
 ```
 
+Summarize every materialized department and the shared catalog without selecting
+one department:
+
+```bash
+uv run weather-analysis meteo-france dataset status
+```
+
+The global view lists only departments needing attention by default. Add
+`--verbose` to show every materialized department, and
+`--include-unmaterialized` to list downloaded raw departments which have not yet
+been transformed. Raw-only departments are informational and do not make the
+dataset unhealthy.
+
 Create missing partitions or atomically rebuild only years affected by changed
 source archives:
 
 ```bash
 uv run weather-analysis meteo-france dataset sync --department 44
 ```
+
+Synchronization reports each processing stage and, in an interactive terminal,
+shows archive progress plus processed-row throughput. Use `--no-progress` for
+quiet scripts and automation.
+
+Shared department and source-file metadata is assembled from every department
+manifest, so synchronizing one department preserves the others. Check this
+global metadata alongside a department's raw-file status with `dataset status`.
+Normal status output reports department counts; add `--verbose` to display the
+complete expected and observed department lists. Inconsistencies always print
+the missing or unexpected department codes.
+If status reports metadata drift, repair only the shared metadata—without
+reprocessing weather observations—with:
+
+```bash
+uv run weather-analysis meteo-france dataset repair-metadata
+```
+
+The repair validates manifest, fact, and station-dimension department sets,
+stages deterministic replacements, refreshes DuckDB, and rolls back on failure.
+It also writes a compact audit report under
+`data/meteo_france/analytics/v1/metadata/repairs`.
 
 Curated schema changes require an explicit rebuild:
 
