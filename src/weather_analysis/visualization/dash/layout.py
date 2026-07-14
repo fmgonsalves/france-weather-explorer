@@ -21,6 +21,7 @@ def default_filters() -> DashboardFilters:
         department="44", metric="T", stations=(DEFAULT_STATION,),
         start_date=date(DEFAULT_YEAR, 1, 1), end_date=date(DEFAULT_YEAR, 12, 31),
         time_basis="local", resolution="hourly", daily_statistics=("average",), quality_mode="all",
+        exclude_selected_period_from_baseline=True,
     )
 
 
@@ -80,11 +81,11 @@ def build_layout(analytics_dir: Path):
                                                {"label": "UTC", "value": "utc"}],
                     value="local", inline=True,
                 )),
-                field("Resampling rate", dcc.RadioItems(
+                html.Div(field("Resampling rate", dcc.RadioItems(
                     id="resolution", options=[{"label": "Hourly", "value": "hourly"},
                                                {"label": "Daily", "value": "daily"}],
                     value="hourly", inline=True,
-                )),
+                )), id="resampling-wrapper"),
                 html.Div(field("Daily statistics", dcc.Dropdown(
                     id="daily-statistic",
                     options=[
@@ -94,6 +95,14 @@ def build_layout(analytics_dir: Path):
                     ],
                     value=["average"], multi=True, clearable=False,
                 )), id="daily-statistic-wrapper", className="is-hidden"),
+                html.Div(field("Historical baseline", dcc.RadioItems(
+                    id="baseline-mode",
+                    options=[
+                        {"label": "Exclude selected period", "value": "exclude"},
+                        {"label": "Include selected period", "value": "include"},
+                    ],
+                    value="exclude",
+                )), id="baseline-mode-wrapper", className="is-hidden"),
                 field("Quality", dcc.RadioItems(
                     id="quality-mode", options=[{"label": "All observations", "value": "all"},
                                                  {"label": "Exclude doubtful (code 2)", "value": "exclude_doubtful"}],
@@ -118,14 +127,30 @@ def build_layout(analytics_dir: Path):
                     dcc.Graph(id="station-map", figure=empty_figure("Loading station network", 390),
                               config={"displaylogo": False}),
                 ], className="chart-card")),
-                html.Div(dcc.Loading(dcc.Graph(
-                    id="time-series", figure=empty_figure("Loading observations"),
-                    config={"displaylogo": False},
-                )), className="chart-card"),
-                html.Div(dcc.Loading(dcc.Graph(
-                    id="coverage-heatmap", figure=empty_figure("Loading coverage", 330),
-                    config={"displaylogo": False},
-                )), className="chart-card"),
+                dcc.Tabs(id="analysis-tabs", value="time-series", children=[
+                    dcc.Tab(label="Time series", value="time-series", children=[
+                        html.Div(dcc.Loading(dcc.Graph(
+                            id="time-series", figure=empty_figure("Loading observations"),
+                            config={"displaylogo": False},
+                        )), className="chart-card"),
+                        html.Div(dcc.Loading(dcc.Graph(
+                            id="coverage-heatmap", figure=empty_figure("Loading coverage", 330),
+                            config={"displaylogo": False},
+                        )), className="chart-card"),
+                    ]),
+                    dcc.Tab(label="Historical comparison", value="historical-comparison", children=[
+                        html.P(
+                            "Daily selected values compared with the same calendar day across each station's history.",
+                            className="analysis-note",
+                        ),
+                        html.Div(id="comparison-error", className="error-message"),
+                        html.Div(dcc.Loading(dcc.Graph(
+                            id="historical-comparison",
+                            figure=empty_figure("Open this tab to load the historical comparison"),
+                            config={"displaylogo": False},
+                        )), className="chart-card"),
+                    ]),
+                ]),
             ], className="main-content"),
         ], className="app-shell"),
     ])

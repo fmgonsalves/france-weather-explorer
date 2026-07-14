@@ -12,7 +12,7 @@ from weather_analysis.queries.connection import validate_catalog
 from weather_analysis.queries.coverage import expected_hours, fetch_coverage_grid, fetch_summary
 from weather_analysis.queries.metadata import available_years, metric_metadata, stations_for_period
 from weather_analysis.queries.models import DashboardFilters, QueryLimitError
-from weather_analysis.queries.observations import fetch_timeseries
+from weather_analysis.queries.observations import fetch_historical_comparison, fetch_timeseries
 
 
 def make_catalog(tmp_path: Path) -> Path:
@@ -30,6 +30,20 @@ def make_catalog(tmp_path: Path) -> Path:
         )
     """)
     rows = [
+        ("44", 2023, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2023-01-01 00:00:00+00", "2023-01-01", 1, 0.0, 1),
+        ("44", 2023, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2023-01-01 01:00:00+00", "2023-01-01", 2, 10.0, 1),
+        ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2024-01-01 00:00:00+00", "2024-01-01", 1, 2.0, 1),
+        ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2024-01-01 01:00:00+00", "2024-01-01", 2, 14.0, 1),
+        ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2024-01-02 00:00:00+00", "2024-01-02", 1, 3.0, 1),
+        ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2024-01-02 01:00:00+00", "2024-01-02", 2, 7.0, 1),
+        ("44", 2020, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2020-02-29 12:00:00+00", "2020-02-29", 13, 1.0, 1),
         ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
          "2024-10-27 00:00:00+00", "2024-10-27", 2, 10.0, 1),
         ("44", 2024, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
@@ -91,7 +105,7 @@ def test_filter_validation_and_whitelists():
 def test_catalog_metadata_and_missing_database(tmp_path: Path):
     root = make_catalog(tmp_path)
     assert validate_catalog(root).name == "weather.duckdb"
-    assert available_years(str(root)) == (2025, 2024)
+    assert available_years(str(root)) == (2025, 2024, 2023, 2020)
     assert metric_metadata(str(root))["T"]["description_fr"] == "Official T"
     assert stations_for_period(root, "44", date(2025, 1, 1), date(2025, 1, 1)).height == 3
     with pytest.raises(FileNotFoundError):
@@ -167,3 +181,63 @@ def test_daily_resampling_is_consistent_across_multi_year_ranges(tmp_path: Path)
     )
     assert multi_year["NUM_POSTE"].n_unique() == 2
     assert date(2024, 2, 29) in multi_year["observation_date"].to_list()
+
+
+def test_historical_comparison_daily_envelopes_and_exact_date_exclusion(tmp_path: Path):
+    root = make_catalog(tmp_path)
+    row = fetch_historical_comparison(root, filters()).row(0, named=True)
+    assert row["selected_average"] == pytest.approx(5.0)
+    assert row["selected_minimum"] == pytest.approx(4.0)
+    assert row["selected_maximum"] == pytest.approx(6.0)
+    assert row["selected_contributing_hours"] == 2
+    assert row["absolute_minimum"] == pytest.approx(0.0)
+    assert row["absolute_maximum"] == pytest.approx(14.0)
+    assert row["average_minimum"] == pytest.approx(1.0)
+    assert row["average_maximum"] == pytest.approx(12.0)
+    assert row["historical_days"] == 2
+    assert row["historical_years"] == 2
+
+    included = fetch_historical_comparison(
+        root, filters(exclude_selected_period_from_baseline=False)
+    ).row(0, named=True)
+    assert included["average_minimum"] == pytest.approx(2.0)
+    assert included["average_maximum"] == pytest.approx(10.0)
+    assert included["historical_days"] == 3
+
+
+def test_historical_comparison_keeps_missing_dates_and_leap_day(tmp_path: Path):
+    root = make_catalog(tmp_path)
+    comparison = fetch_historical_comparison(root, filters(end_date=date(2025, 1, 2)))
+    assert comparison["observation_date"].to_list() == [date(2025, 1, 1), date(2025, 1, 2)]
+    missing = comparison.filter(comparison["observation_date"] == date(2025, 1, 2)).row(0, named=True)
+    assert missing["selected_average"] is None
+    assert missing["absolute_minimum"] == pytest.approx(3.0)
+    leap = fetch_historical_comparison(
+        root, filters(start_date=date(2024, 2, 29), end_date=date(2024, 2, 29))
+    ).row(0, named=True)
+    assert leap["absolute_minimum"] == pytest.approx(1.0)
+    assert leap["historical_years"] == 1
+
+
+def test_historical_rainfall_uses_daily_totals(tmp_path: Path):
+    root = make_catalog(tmp_path)
+    rain = fetch_historical_comparison(root, filters(metric="RR1")).row(0, named=True)
+    assert rain["selected_total"] == pytest.approx(1.0)
+    assert rain["selected_average"] is None
+    assert rain["absolute_minimum"] == pytest.approx(1.0)
+    assert rain["absolute_maximum"] == pytest.approx(1.6)
+    assert rain["historical_average_total"] == pytest.approx(1.3)
+
+
+def test_historical_comparison_respects_quality_and_point_limit(tmp_path: Path, monkeypatch):
+    root = make_catalog(tmp_path)
+    period = filters(
+        start_date=date(2024, 10, 27), end_date=date(2024, 10, 27),
+        quality_mode="exclude_doubtful", exclude_selected_period_from_baseline=False,
+    )
+    selected = fetch_historical_comparison(root, period).row(0, named=True)
+    assert selected["selected_average"] == pytest.approx(10.0)
+    assert selected["selected_contributing_hours"] == 1
+    monkeypatch.setattr(observation_queries, "MAX_CHART_POINTS", 0)
+    with pytest.raises(QueryLimitError, match="fewer stations"):
+        fetch_historical_comparison(root, filters())

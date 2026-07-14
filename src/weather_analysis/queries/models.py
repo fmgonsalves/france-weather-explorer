@@ -47,6 +47,7 @@ class DashboardFilters:
     resolution: Literal["hourly", "daily"] = "hourly"
     daily_statistics: tuple[str, ...] = ("average",)
     quality_mode: Literal["all", "exclude_doubtful"] = "all"
+    exclude_selected_period_from_baseline: bool = True
 
     def __post_init__(self) -> None:
         if self.department != "44":
@@ -105,4 +106,7 @@ class DashboardFilters:
             resolution=payload.get("resolution", "hourly"),
             daily_statistics=tuple(statistics),
             quality_mode=payload.get("quality_mode", "all"),
+            exclude_selected_period_from_baseline=bool(
+                payload.get("exclude_selected_period_from_baseline", True)
+            ),
         )

@@ -4,6 +4,7 @@ from datetime import date
 
 import plotly.graph_objects as go
 import polars as pl
+from plotly.subplots import make_subplots
 
 from weather_analysis.queries.models import DashboardFilters
 
@@ -102,6 +103,143 @@ def _rgba(hex_color: str, alpha: float) -> str:
     value = hex_color.lstrip("#")
     red, green, blue = (int(value[index:index + 2], 16) for index in (0, 2, 4))
     return f"rgba({red},{green},{blue},{alpha})"
+
+
+def historical_comparison_figure(
+    frame: pl.DataFrame, filters: DashboardFilters
+) -> go.Figure:
+    if frame.is_empty() or frame["absolute_minimum"].null_count() == frame.height:
+        return empty_figure("No historical baseline remains for this selection")
+    stations = frame.partition_by("NUM_POSTE", maintain_order=True)
+    titles = [f"{part['NOM_USUEL'][0]} ({part['NUM_POSTE'][0]})" for part in stations]
+    figure = make_subplots(
+        rows=len(stations), cols=1, shared_xaxes=True, shared_yaxes=True,
+        vertical_spacing=min(0.08, 0.18 / max(1, len(stations))), subplot_titles=titles,
+    )
+    outer = "rgba(71,84,103,0.12)"
+    inner = "rgba(21,94,239,0.20)"
+    for row, station in enumerate(stations, start=1):
+        dates = station["observation_date"].to_list()
+        show_legend = row == 1
+        band_custom = [
+            [
+                item["absolute_minimum"], item["absolute_maximum"],
+                item["average_minimum"], item["average_maximum"],
+            ]
+            for item in station.iter_rows(named=True)
+        ]
+        figure.add_trace(go.Scatter(
+            x=dates, y=station["absolute_minimum"].to_list(), mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip", legendgroup="absolute",
+        ), row=row, col=1)
+        figure.add_trace(go.Scatter(
+            x=dates, y=station["absolute_maximum"].to_list(), mode="lines",
+            line=dict(width=0), fill="tonexty", fillcolor=outer,
+            name="Historical absolute range", showlegend=show_legend,
+            legendgroup="absolute", customdata=band_custom,
+            hovertemplate=(
+                "Absolute range: %{customdata[0]:.2f}–%{customdata[1]:.2f}"
+                "<extra></extra>"
+            ),
+        ), row=row, col=1)
+
+        if filters.metric == "RR1":
+            reference = station["historical_average_total"].to_list()
+            figure.add_trace(go.Scatter(
+                x=dates, y=reference, mode="lines", name="Historical average daily total",
+                line=dict(color="#667085", width=1.8, dash="dash"),
+                showlegend=show_legend, legendgroup="historical-average",
+                customdata=band_custom,
+                hovertemplate=(
+                    "Historical average total: %{y:.2f} " + filters.metric_spec.unit +
+                    "<extra></extra>"
+                ),
+            ), row=row, col=1)
+            _add_selected_line(
+                figure, row, dates, station, "selected_total", "Selected daily total",
+                "#155eef", "solid", 2.6, show_legend, filters,
+            )
+        else:
+            figure.add_trace(go.Scatter(
+                x=dates, y=station["average_minimum"].to_list(), mode="lines",
+                line=dict(width=0), showlegend=False, hoverinfo="skip", legendgroup="average-range",
+            ), row=row, col=1)
+            figure.add_trace(go.Scatter(
+                x=dates, y=station["average_maximum"].to_list(), mode="lines",
+                line=dict(width=0), fill="tonexty", fillcolor=inner,
+                name="Historical average min–max", showlegend=show_legend,
+                legendgroup="average-range", customdata=band_custom,
+                hovertemplate=(
+                    "Average min–max: %{customdata[2]:.2f}–%{customdata[3]:.2f}"
+                    "<extra></extra>"
+                ),
+            ), row=row, col=1)
+            _add_selected_line(
+                figure, row, dates, station, "selected_average", "Selected daily average",
+                "#101828", "solid", 2.6, show_legend, filters,
+            )
+            _add_selected_line(
+                figure, row, dates, station, "selected_minimum", "Selected daily minimum",
+                "#039855", "dot", 1.7, show_legend, filters,
+            )
+            _add_selected_line(
+                figure, row, dates, station, "selected_maximum", "Selected daily maximum",
+                "#dc6803", "dash", 1.7, show_legend, filters,
+            )
+        _add_hover_metadata(figure, row, dates, station)
+
+    baseline = "excluding" if filters.exclude_selected_period_from_baseline else "including"
+    figure.update_layout(
+        template="plotly_white",
+        title=f"Historical daily comparison — baseline {baseline} selected period",
+        height=max(480, 290 * len(stations)), hovermode="x unified",
+        margin=dict(l=60, r=30, t=85, b=50), legend=dict(traceorder="normal"),
+        font=dict(family="Inter, system-ui, sans-serif", color="#344054"),
+    )
+    figure.update_yaxes(title_text=filters.metric_spec.unit, matches="y")
+    figure.update_xaxes(showgrid=True)
+    return figure
+
+
+def _add_selected_line(
+    figure: go.Figure, row: int, dates: list, station: pl.DataFrame,
+    column: str, label: str, color: str, dash: str, width: float,
+    show_legend: bool, filters: DashboardFilters,
+) -> None:
+    figure.add_trace(go.Scatter(
+        x=dates, y=station[column].to_list(), mode="lines", name=label,
+        line=dict(color=color, dash=dash, width=width), connectgaps=False,
+        showlegend=show_legend, legendgroup=column,
+        hovertemplate=(
+            label + ": %{y:.2f} " + filters.metric_spec.unit + "<extra></extra>"
+        ),
+    ), row=row, col=1)
+
+
+def _add_hover_metadata(
+    figure: go.Figure, row: int, dates: list, station: pl.DataFrame
+) -> None:
+    values = station.iter_rows(named=True)
+    metadata = [
+        [item["selected_contributing_hours"], item["historical_years"]]
+        for item in values
+    ]
+    anchors = [
+        (minimum + maximum) / 2
+        if minimum is not None and maximum is not None
+        else minimum if minimum is not None else maximum
+        for minimum, maximum in zip(
+            station["absolute_minimum"].to_list(), station["absolute_maximum"].to_list()
+        )
+    ]
+    figure.add_trace(go.Scatter(
+        x=dates, y=anchors, mode="lines", line=dict(width=0, color="rgba(0,0,0,0)"),
+        showlegend=False, hoverinfo="all", customdata=metadata,
+        hovertemplate=(
+            "<span style='font-size:10px'><i>Selected hours: %{customdata[0]} · "
+            "Historical years: %{customdata[1]}</i></span><extra></extra>"
+        ),
+    ), row=row, col=1)
 
 
 def coverage_heatmap_figure(frame: pl.DataFrame, station_label: str, metric: str) -> go.Figure:

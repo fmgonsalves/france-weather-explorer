@@ -13,6 +13,7 @@ from weather_analysis.queries.coverage import (
 from weather_analysis.queries.metadata import metric_metadata, stations_for_period
 from weather_analysis.queries.models import DashboardFilters, METRICS
 from weather_analysis.queries.observations import (
+    fetch_historical_comparison,
     fetch_timeseries,
     filters_from_values,
 )
@@ -20,6 +21,7 @@ from weather_analysis.queries.observations import (
 from .figures import (
     coverage_heatmap_figure,
     empty_figure,
+    historical_comparison_figure,
     station_map_figure,
     time_series_figure,
 )
@@ -63,10 +65,16 @@ def register_callbacks(app, analytics_dir: Path) -> None:
         return options, list(spec.default_daily_statistics), help_content
 
     @app.callback(
-        Output("daily-statistic-wrapper", "className"), Input("resolution", "value"),
+        Output("resampling-wrapper", "className"),
+        Output("daily-statistic-wrapper", "className"),
+        Output("baseline-mode-wrapper", "className"),
+        Input("resolution", "value"), Input("analysis-tabs", "value"),
     )
-    def toggle_daily_statistic(resolution):
-        return "" if resolution == "daily" else "is-hidden"
+    def toggle_analysis_controls(resolution, analysis):
+        if analysis == "historical-comparison":
+            return "is-hidden", "is-hidden", ""
+        daily_class = "" if resolution == "daily" else "is-hidden"
+        return "", daily_class, "is-hidden"
 
     @app.callback(
         Output("stations", "options"),
@@ -96,10 +104,11 @@ def register_callbacks(app, analytics_dir: Path) -> None:
         State("date-range", "start_date"), State("date-range", "end_date"),
         State("time-basis", "value"), State("resolution", "value"),
         State("daily-statistic", "value"), State("quality-mode", "value"),
+        State("baseline-mode", "value"),
         prevent_initial_call=True,
     )
     def apply_filters(_clicks, metric, stations, period_mode, year, start, end,
-                      time_basis, resolution, statistic, quality_mode):
+                      time_basis, resolution, statistic, quality_mode, baseline_mode):
         try:
             if period_mode == "year":
                 if year is None:
@@ -109,7 +118,7 @@ def register_callbacks(app, analytics_dir: Path) -> None:
                 raise ValueError("Select both start and end dates")
             filters = filters_from_values(
                 metric, stations or [], start[:10], end[:10], time_basis, resolution,
-                statistic or [], quality_mode,
+                statistic or [], quality_mode, baseline_mode != "include",
             )
         except (KeyError, TypeError, ValueError) as error:
             return no_update, str(error)
@@ -146,6 +155,21 @@ def register_callbacks(app, analytics_dir: Path) -> None:
             return "—", "—", "—", "—", empty, empty, empty_figure(message, 330), message
 
     @app.callback(
+        Output("historical-comparison", "figure"), Output("comparison-error", "children"),
+        Input("filter-store", "data"), Input("analysis-tabs", "value"),
+    )
+    def render_historical_comparison(payload, analysis):
+        if analysis != "historical-comparison":
+            return no_update, ""
+        try:
+            filters = DashboardFilters.from_dict(payload)
+            comparison = fetch_historical_comparison(analytics_dir, filters)
+            return historical_comparison_figure(comparison, filters), ""
+        except Exception as error:
+            message = str(error)
+            return empty_figure(message), message
+
+    @app.callback(
         Output("stations", "value"), Input("station-map", "clickData"),
         prevent_initial_call=True,
     )
@@ -157,16 +181,24 @@ def register_callbacks(app, analytics_dir: Path) -> None:
 
     @app.callback(
         Output("download-data", "data"), Input("download", "n_clicks"),
-        State("filter-store", "data"), prevent_initial_call=True,
+        State("filter-store", "data"), State("analysis-tabs", "value"),
+        prevent_initial_call=True,
     )
-    def download_displayed_data(_clicks, payload):
+    def download_displayed_data(_clicks, payload, analysis):
         try:
             filters = DashboardFilters.from_dict(payload)
-            frame = fetch_timeseries(analytics_dir, filters)
-            filename = (
-                f"meteo_france_44_{filters.metric}_{filters.start_date}_"
-                f"{filters.end_date}_{filters.resolution}.csv"
-            )
+            if analysis == "historical-comparison":
+                frame = fetch_historical_comparison(analytics_dir, filters)
+                filename = (
+                    f"meteo_france_44_{filters.metric}_{filters.start_date}_"
+                    f"{filters.end_date}_historical_comparison.csv"
+                )
+            else:
+                frame = fetch_timeseries(analytics_dir, filters)
+                filename = (
+                    f"meteo_france_44_{filters.metric}_{filters.start_date}_"
+                    f"{filters.end_date}_{filters.resolution}.csv"
+                )
             return dcc.send_string(frame.write_csv(), filename)
         except Exception:
             return no_update

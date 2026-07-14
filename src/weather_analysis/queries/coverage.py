@@ -45,6 +45,7 @@ def fetch_coverage_grid(analytics_dir: Path, filters: DashboardFilters) -> pl.Da
         start_date=filters.start_date, end_date=filters.end_date,
         time_basis=filters.time_basis, resolution=filters.resolution,
         daily_statistics=filters.daily_statistics, quality_mode=filters.quality_mode,
+        exclude_selected_period_from_baseline=filters.exclude_selected_period_from_baseline,
     )
     _, day_expression, hour_expression = _expressions(primary)
     where, parameters = _where(primary)

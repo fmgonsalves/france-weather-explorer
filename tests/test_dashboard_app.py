@@ -10,4 +10,4 @@ def test_dash_layout_and_callback_smoke(tmp_path):
     response = app.server.test_client().get("/")
     assert response.status_code == 200
     assert app.title == "Loire-Atlantique Weather Explorer"
-    assert len(app.callback_map) >= 9
+    assert len(app.callback_map) >= 10

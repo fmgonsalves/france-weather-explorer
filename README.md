@@ -169,7 +169,11 @@ complete calendar year (2025). It provides station maps, hourly or daily time
 series, coverage diagnostics, quality-code filtering, and CSV export for `T`,
 `TD`, `U`, `RR1`, `FF`, and `PSTAT`. The selected date range is always plotted
 consistently; it does not switch to a different profile when the range exceeds
-one year.
+one year. A separate historical-comparison tab aligns each selected station's
+daily values with its complete record by calendar day. It shows absolute and
+average historical min–max envelopes for most metrics, and a daily-total range
+and average for precipitation. The selected dates are excluded from that
+baseline by default and can be included from the tab-specific control.
 
 Use a different local address, port, or analytical directory with:
 

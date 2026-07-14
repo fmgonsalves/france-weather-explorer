@@ -29,5 +29,6 @@ body { margin: 0; background: #f8fafc; }
 .summary-value { margin-top: 7px; font-size: 1.3rem; font-weight: 700; }
 .chart-card { padding: 4px; margin-bottom: 18px; overflow: hidden; }
 .dash-tabs { margin-top: 8px; }
+.analysis-note { margin: 16px 4px 10px; color: #667085; font-size: .85rem; }
 @media (max-width: 900px) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: 0; border-right: 0; border-bottom: 1px solid #eaecf0; } .summary-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 520px) { .app-header, .main-content, .sidebar { padding-left: 16px; padding-right: 16px; } .summary-grid { grid-template-columns: 1fr; } }
