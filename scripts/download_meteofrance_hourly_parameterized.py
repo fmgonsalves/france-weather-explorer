@@ -22,7 +22,7 @@ def main() -> None:
         arguments.extend(("--end-year", str(END_YEAR)))
     directory_name = "hourly_raw" if STATION_CATEGORY == "main" else "hourly_complementary"
     arguments.extend(("--output-dir", str(OUTPUT_ROOT / directory_name)))
-    print("Compatibility wrapper: prefer the `weather-analysis meteo-france` CLI.")
+    print("Compatibility wrapper: prefer the `france-weather-explorer meteo-france` CLI.")
     raise SystemExit(run(arguments))
 
 

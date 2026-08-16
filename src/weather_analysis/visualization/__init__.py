@@ -1,1 +1,1 @@
-"""Visualization frontends for weather-analysis."""
+"""Visualization frontends for France Weather Explorer."""

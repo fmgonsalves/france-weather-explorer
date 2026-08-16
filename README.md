@@ -1,4 +1,4 @@
-# Weather Analysis
+# France Weather Explorer
 
 Tools for downloading and analyzing Météo-France weather observations.
 
@@ -7,19 +7,19 @@ Tools for downloading and analyzing Météo-France weather observations.
 Inspect the main hourly archive without changing local files:
 
 ```bash
-uv run weather-analysis meteo-france status
+uv run france-weather-explorer meteo-france status
 ```
 
 Download only missing, partial, or size-mismatched resources:
 
 ```bash
-uv run weather-analysis meteo-france download
+uv run france-weather-explorer meteo-france download
 ```
 
 Filter resources by department and overlapping publication period:
 
 ```bash
-uv run weather-analysis meteo-france status \
+uv run france-weather-explorer meteo-france status \
   --department 44 \
   --department 75 \
   --start-year 2010 \
@@ -64,25 +64,25 @@ missing, partial, or invalid. A catalog request failure also returns nonzero.
 Inspect headers and group schemas without extracting the gzip archives:
 
 ```bash
-uv run weather-analysis meteo-france inspect --mode schema
+uv run france-weather-explorer meteo-france inspect --mode schema
 ```
 
 Stream every row to build archive-level counts and coverage:
 
 ```bash
-uv run weather-analysis meteo-france inspect --mode inventory
+uv run france-weather-explorer meteo-france inspect --mode inventory
 ```
 
 Profile the smallest representative archive from every distinct schema:
 
 ```bash
-uv run weather-analysis meteo-france inspect --mode profile
+uv run france-weather-explorer meteo-france inspect --mode profile
 ```
 
 Run a complete row-level exploration for exactly one department:
 
 ```bash
-uv run weather-analysis meteo-france inspect \
+uv run france-weather-explorer meteo-france inspect \
   --mode explore \
   --department 44 \
   --report-dir data/meteo_france/metadata/department=44
@@ -104,14 +104,14 @@ default to `data/meteo_france/metadata`. Only files ending exactly in
 Preview local source changes without writing:
 
 ```bash
-uv run weather-analysis meteo-france dataset status --department 44
+uv run france-weather-explorer meteo-france dataset status --department 44
 ```
 
 Summarize every materialized department and the shared catalog without selecting
 one department:
 
 ```bash
-uv run weather-analysis meteo-france dataset status
+uv run france-weather-explorer meteo-france dataset status
 ```
 
 The global view lists only departments needing attention by default. Add
@@ -124,7 +124,7 @@ Create missing partitions or atomically rebuild only years affected by changed
 source archives:
 
 ```bash
-uv run weather-analysis meteo-france dataset sync --department 44
+uv run france-weather-explorer meteo-france dataset sync --department 44
 ```
 
 Synchronization reports each processing stage and, in an interactive terminal,
@@ -141,7 +141,7 @@ If status reports metadata drift, repair only the shared metadata—without
 reprocessing weather observations—with:
 
 ```bash
-uv run weather-analysis meteo-france dataset repair-metadata
+uv run france-weather-explorer meteo-france dataset repair-metadata
 ```
 
 The repair validates manifest, fact, and station-dimension department sets,
@@ -152,7 +152,7 @@ It also writes a compact audit report under
 Curated schema changes require an explicit rebuild:
 
 ```bash
-uv run weather-analysis meteo-france dataset rebuild \
+uv run france-weather-explorer meteo-france dataset rebuild \
   --department 44 \
   --schema-version 1
 ```
@@ -203,7 +203,7 @@ Available catalog views are `hourly_core`, `hourly_surface`, `hourly_marine`,
 Run the local Dash application over the analytical DuckDB catalog:
 
 ```bash
-uv run weather-analysis dashboard dash
+uv run france-weather-explorer dashboard dash
 ```
 
 The dashboard discovers materialized departments from DuckDB and analyzes one
@@ -241,7 +241,7 @@ applied state.
 Use a different local address, port, or analytical directory with:
 
 ```bash
-uv run weather-analysis dashboard dash \
+uv run france-weather-explorer dashboard dash \
   --host 127.0.0.1 \
   --port 8050 \
   --analytics-dir data/meteo_france/analytics/v1 \

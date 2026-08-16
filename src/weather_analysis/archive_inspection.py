@@ -256,7 +256,7 @@ def _table(rows: list[dict], metadata: dict[str, str]) -> pa.Table:
 def _report_metadata(root: Path, mode: str, selected: int, filters: dict) -> dict[str, str]:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "tool": "weather-analysis",
+        "tool": "france-weather-explorer",
         "mode": mode,
         "source_archive_path": str(root.resolve()),
         "selected_archives": str(selected),

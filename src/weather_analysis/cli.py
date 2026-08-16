@@ -79,7 +79,7 @@ class TqdmProgressReporter:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="weather-analysis")
+    parser = argparse.ArgumentParser(prog="france-weather-explorer")
     commands = parser.add_subparsers(dest="service", required=True)
     dashboard = commands.add_parser("dashboard", help="Run weather visualization applications")
     dashboard_apps = dashboard.add_subparsers(dest="dashboard_app", required=True)
@@ -338,7 +338,7 @@ def run(argv: list[str] | None = None) -> int:
         parser.error("--mode explore requires exactly one --department")
     output_dir = args.output_dir or default_output_dir(args.category)
     session = requests.Session()
-    session.headers["User-Agent"] = "weather-analysis-meteofrance/1.0"
+    session.headers["User-Agent"] = "france-weather-explorer-meteofrance/1.0"
     if args.action == "inspect":
         if args.mode == "explore":
             exit_code, summary = run_department_exploration(

@@ -2,7 +2,7 @@ from weather_analysis.cli import run
 
 
 def main() -> None:
-    print("Compatibility wrapper: prefer `weather-analysis meteo-france download`.")
+    print("Compatibility wrapper: prefer `france-weather-explorer meteo-france download`.")
     raise SystemExit(run(["meteo-france", "download"]))
 
 

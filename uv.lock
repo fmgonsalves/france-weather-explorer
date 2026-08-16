@@ -1195,7 +1195,7 @@ wheels = [
 ]
 
 [[package]]
-name = "weather-analysis"
+name = "france-weather-explorer"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
