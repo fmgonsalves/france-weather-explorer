@@ -215,12 +215,12 @@ def fetch_historical_comparison(
 
 
 def filters_from_values(
-    metric: str, stations: list[str] | tuple[str, ...], start: str, end: str,
+    department: str, metric: str, stations: list[str] | tuple[str, ...], start: str, end: str,
     time_basis: str, resolution: str, daily_statistics: list[str] | tuple[str, ...],
     quality_mode: str, exclude_selected_period_from_baseline: bool = True,
 ) -> DashboardFilters:
     return DashboardFilters(
-        department="44", metric=metric, stations=tuple(stations),
+        department=department, metric=metric, stations=tuple(stations),
         start_date=date.fromisoformat(start), end_date=date.fromisoformat(end),
         time_basis=time_basis, resolution=resolution,
         daily_statistics=tuple(daily_statistics), quality_mode=quality_mode,

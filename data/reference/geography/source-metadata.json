@@ -1,0 +1,45 @@
+{
+  "dataset": "Contours administratifs",
+  "publisher": "data.gouv.fr",
+  "dataset_url": "https://www.data.gouv.fr/datasets/contours-administratifs",
+  "source_description": "Administrative boundaries derived primarily from IGN Admin Express, distributed as generalized GeoJSON.",
+  "license": {
+    "name": "Open Data Commons Open Database License (ODbL)",
+    "url": "https://opendatacommons.org/licenses/odbl/1-0/"
+  },
+  "retrieved_at": "2026-08-16",
+  "release_selector": "2026",
+  "generalization": "100m",
+  "coordinate_reference_system": "WGS 84 longitude/latitude (GeoJSON)",
+  "files": [
+    {
+      "path": "departments-100m.geojson",
+      "source_url": "https://etalab-datasets.geo.data.gouv.fr/contours-administratifs/2026/geojson/departements-100m.geojson",
+      "size_bytes": 2754761,
+      "sha256": "e236204431730cdfe103efea54497896b874c3451efc663a4d4fdcbc831f9e0b",
+      "feature_count": 109,
+      "feature_properties": [
+        "code",
+        "nom",
+        "region"
+      ]
+    },
+    {
+      "path": "regions-100m.geojson",
+      "source_url": "https://etalab-datasets.geo.data.gouv.fr/contours-administratifs/2026/geojson/regions-100m.geojson",
+      "size_bytes": 1564631,
+      "sha256": "f85fe769841120140cdf0dc8fb9536926ad884157fd8e26f74aec58b18994ba4",
+      "feature_count": 26,
+      "feature_properties": [
+        "code",
+        "nom"
+      ]
+    }
+  ],
+  "usage_notes": [
+    "Join weather department codes to the department GeoJSON property named code.",
+    "The department property named region contains the parent region code and can be joined to the region GeoJSON property named code.",
+    "Department and region codes must be treated as strings so leading zeroes and Corsican codes are preserved.",
+    "These files are pinned to the 2026 release; use the recorded SHA-256 checksums to detect accidental changes."
+  ]
+}

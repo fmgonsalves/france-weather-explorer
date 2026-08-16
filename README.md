@@ -198,7 +198,7 @@ Available catalog views are `hourly_core`, `hourly_surface`, `hourly_marine`,
 `hourly_snow`, `stations`, `station_metadata_history`, `metrics`, `departments`,
 `source_files`, and `processing_runs`.
 
-## Department 44 dashboard
+## Multi-department dashboard
 
 Run the local Dash application over the analytical DuckDB catalog:
 
@@ -206,9 +206,12 @@ Run the local Dash application over the analytical DuckDB catalog:
 uv run weather-analysis dashboard dash
 ```
 
-The dashboard defaults to department 44, Nantes-Bouguenais, and the latest
-complete calendar year (2025). It provides station maps, hourly or daily time
-series, coverage diagnostics, quality-code filtering, and CSV export for `T`,
+The dashboard discovers materialized departments from DuckDB and analyzes one
+department at a time. It defaults to department 44 when available and otherwise
+uses the lowest available code. The initial period is the latest available year,
+from January 1 through that department's latest observation date; the initial
+station is selected by metric coverage. It provides station maps, hourly or daily time
+series, coverage diagnostics, quality-code filtering, and department-specific CSV export for `T`,
 `TD`, `U`, `RR1`, `FF`, and `PSTAT`. The selected date range is always plotted
 consistently; it does not switch to a different profile when the range exceeds
 one year. A separate historical-comparison tab aligns each selected station's
@@ -217,14 +220,51 @@ average historical min–max envelopes for most metrics, and a daily-total range
 and average for precipitation. The selected dates are excluded from that
 baseline by default and can be included from the tab-specific control.
 
+The **Department overview** tab maps period-mean air temperature for qualifying
+stations across every materialized department. A station-day contributes only
+when at least 18 valid hourly temperatures are present, and qualifying daily
+means receive equal weight. Exact station markers remain visible over an
+optional inverse-distance estimated surface. The estimate is clipped to
+materialized department boundaries and is hidden unless at least three stations
+are within 75 km. It is exploratory interpolation, not a departmental aggregate
+or an official gridded Météo-France product. See
+[`docs/geographic-temperature-overview.md`](docs/geographic-temperature-overview.md)
+for calculation and provenance details.
+
+The sidebar contains the filters shared by every analysis. Resampling and daily
+statistics live in the time-series tab, while historical-baseline options live
+in the historical-comparison tab. Sidebar **Apply filters** commits only shared
+filters; a tab's **Apply changes** commits pending shared filters together with
+that tab's options. Downloads are also tab-specific and always use the currently
+applied state.
+
 Use a different local address, port, or analytical directory with:
 
 ```bash
 uv run weather-analysis dashboard dash \
   --host 127.0.0.1 \
   --port 8050 \
-  --analytics-dir data/meteo_france/analytics/v1
+  --analytics-dir data/meteo_france/analytics/v1 \
+  --geography-dir data/reference/geography
 ```
 
 The dashboard opens `weather.duckdb` read-only. Restart it after synchronizing
 the analytical dataset so its cached station and metric metadata are refreshed.
+
+## Administrative geography reference data
+
+The dashboard versions the 2026 `100m` generalized department and region
+GeoJSON files under `data/reference/geography`. They come from the French
+government's [Contours administratifs](https://www.data.gouv.fr/datasets/contours-administratifs)
+dataset, derived primarily from IGN Admin Express and distributed under the
+Open Data Commons Open Database License. Versioning these relatively small
+reference files keeps maps reproducible and available offline; all other files
+under `data/` remain ignored by Git.
+
+Weather department codes join to the GeoJSON `code` property as strings. The
+department `region` property joins to the region GeoJSON `code`; string handling
+preserves leading zeroes and Corsican codes. Source URLs, sizes, feature counts,
+license information, and SHA-256 checksums are recorded in
+`data/reference/geography/source-metadata.json`. To refresh the boundaries,
+download a named annual release, validate the schemas and dashboard, then update
+the files, release selector, sizes, and checksums together in one reviewed change.

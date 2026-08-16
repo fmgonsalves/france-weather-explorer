@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
+import re
 from typing import Literal
 
 
@@ -50,8 +51,8 @@ class DashboardFilters:
     exclude_selected_period_from_baseline: bool = True
 
     def __post_init__(self) -> None:
-        if self.department != "44":
-            raise ValueError("Dashboard v1 supports department 44 only")
+        if not re.fullmatch(r"(?:2A|2B|\d{2,3})", self.department):
+            raise ValueError(f"Invalid department code: {self.department}")
         if self.metric not in METRICS:
             raise ValueError(f"Unsupported metric: {self.metric}")
         if not self.stations:

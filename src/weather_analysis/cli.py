@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument(
         "--analytics-dir", type=Path, default=Path("data/meteo_france/analytics/v1")
     )
+    dash.add_argument(
+        "--geography-dir", type=Path, default=Path("data/reference/geography")
+    )
     dash.add_argument("--host", default="127.0.0.1")
     dash.add_argument("--port", type=int, default=8050)
     dash.add_argument("--debug", action="store_true")
@@ -256,7 +259,13 @@ def run(argv: list[str] | None = None) -> int:
         if not 1 <= args.port <= 65535:
             parser.error("--port must be between 1 and 65535")
         try:
-            run_dashboard(args.analytics_dir, host=args.host, port=args.port, debug=args.debug)
+            run_dashboard(
+                args.analytics_dir,
+                geography_dir=args.geography_dir,
+                host=args.host,
+                port=args.port,
+                debug=args.debug,
+            )
         except (OSError, ValueError) as error:
             print(f"Dashboard failed: {error}", file=sys.stderr)
             return 1

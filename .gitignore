@@ -18,6 +18,14 @@ wheels/
 # Notebook scratch state
 .ipynb_checkpoints/
 
-# Downloaded, reference, and generated weather data
-data/
+# Downloaded and generated weather data; only the pinned administrative
+# boundaries needed by the dashboard are versioned.
+data/*
+!data/reference/
+data/reference/*
+!data/reference/geography/
+data/reference/geography/*
+!data/reference/geography/departments-100m.geojson
+!data/reference/geography/regions-100m.geojson
+!data/reference/geography/source-metadata.json
 *.duckdb

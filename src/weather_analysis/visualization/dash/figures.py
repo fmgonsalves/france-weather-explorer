@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from weather_analysis.geography import AdministrativeGeography
 from weather_analysis.queries.models import DashboardFilters
 
 
@@ -262,7 +264,9 @@ def coverage_heatmap_figure(frame: pl.DataFrame, station_label: str, metric: str
     return figure
 
 
-def station_map_figure(frame: pl.DataFrame, selected: tuple[str, ...]) -> go.Figure:
+def station_map_figure(
+    frame: pl.DataFrame, selected: tuple[str, ...], department: str
+) -> go.Figure:
     if frame.is_empty():
         return empty_figure("No station locations are available", 390)
     figure = go.Figure()
@@ -287,9 +291,157 @@ def station_map_figure(frame: pl.DataFrame, selected: tuple[str, ...]) -> go.Fig
                            "<br>First: %{customdata[3]}<br>Last: %{customdata[4]}"
                            "<br>Coverage: %{customdata[5]:.1f}%<extra></extra>"),
         ))
+    latitudes = frame["LAT"].drop_nulls().to_list()
+    longitudes = frame["LON"].drop_nulls().to_list()
+    if latitudes and longitudes:
+        center = {
+            "lat": (min(latitudes) + max(latitudes)) / 2,
+            "lon": (min(longitudes) + max(longitudes)) / 2,
+        }
+        span = max(max(latitudes) - min(latitudes), max(longitudes) - min(longitudes), 0.05)
+        zoom = max(5.5, min(10.5, 7.5 - math.log2(span)))
+    else:
+        center = {"lat": 46.6, "lon": 2.4}
+        zoom = 4.5
     figure.update_layout(
         template="plotly_white", title="Station network", height=390,
-        map=dict(style="carto-positron", center=dict(lat=47.28, lon=-1.68), zoom=7.2),
+        uirevision=f"department:{department}",
+        map=dict(
+            style="carto-positron", center=center, zoom=zoom,
+            uirevision=f"department:{department}",
+        ),
         margin=dict(l=0, r=0, t=50, b=0), legend=dict(orientation="h"),
+    )
+    return figure
+
+
+def station_temperature_overview_figure(
+    stations: pl.DataFrame,
+    surface: pl.DataFrame,
+    geography: AdministrativeGeography,
+    department_codes: tuple[str, ...],
+    show_surface: bool = True,
+) -> go.Figure:
+    boundaries = geography.department_geojson(department_codes)
+    features = boundaries["features"]
+    figure = go.Figure()
+    if features:
+        codes = [str(feature["properties"]["code"]) for feature in features]
+        names = [str(feature["properties"]["nom"]) for feature in features]
+        figure.add_trace(go.Choroplethmap(
+            geojson=boundaries,
+            featureidkey="properties.code",
+            locations=codes,
+            z=[0] * len(codes),
+            text=names,
+            colorscale=[[0, "#e4e7ec"], [1, "#e4e7ec"]],
+            showscale=False,
+            marker=dict(opacity=0.28, line=dict(color="#667085", width=1.2)),
+            name="Materialized departments",
+            hovertemplate="%{text} (%{location})<extra></extra>",
+        ))
+
+    temperatures = (
+        stations["period_mean_temperature"].drop_nulls().to_list()
+        if "period_mean_temperature" in stations.columns else []
+    )
+    if temperatures:
+        color_min, color_max = min(temperatures), max(temperatures)
+        if math.isclose(color_min, color_max):
+            color_min -= 0.5
+            color_max += 0.5
+        if show_surface and not surface.is_empty():
+            figure.add_trace(go.Scattermap(
+                lat=surface["LAT"].to_list(),
+                lon=surface["LON"].to_list(),
+                mode="markers",
+                name="Estimated surface",
+                marker=dict(
+                    size=13,
+                    color=surface["temperature"].to_list(),
+                    coloraxis="coloraxis",
+                    opacity=0.58,
+                    allowoverlap=True,
+                ),
+                customdata=[[value] for value in surface["temperature"].to_list()],
+                hovertemplate="Estimated: %{customdata[0]:.1f} °C<extra></extra>",
+            ))
+
+        custom = [
+            [
+                row["NOM_USUEL"], row["NUM_POSTE"], row["department"], row["ALTI"],
+                row["period_mean_temperature"], row["qualifying_days"], row["valid_hours"],
+            ]
+            for row in stations.iter_rows(named=True)
+        ]
+        figure.add_trace(go.Scattermap(
+            lat=stations["LAT"].to_list(),
+            lon=stations["LON"].to_list(),
+            mode="markers",
+            name="Measured stations",
+            marker=dict(
+                size=11,
+                color=stations["period_mean_temperature"].to_list(),
+                coloraxis="coloraxis",
+                opacity=0.98,
+                allowoverlap=True,
+            ),
+            customdata=custom,
+            hovertemplate=(
+                "%{customdata[0]} (%{customdata[1]})"
+                "<br>Department: %{customdata[2]}"
+                "<br>Period mean: %{customdata[4]:.1f} °C"
+                "<br>Altitude: %{customdata[3]} m"
+                "<br>Qualifying days: %{customdata[5]}"
+                "<br>Valid hours: %{customdata[6]}<extra></extra>"
+            ),
+        ))
+        figure.update_layout(coloraxis=dict(
+            colorscale="RdBu_r", cmin=color_min, cmax=color_max,
+            colorbar=dict(title="Mean °C"),
+        ))
+    else:
+        figure.add_annotation(
+            text="No stations have at least 18 valid temperature hours per day for this period",
+            x=0.5, y=0.04, xref="paper", yref="paper", showarrow=False,
+            bgcolor="rgba(255,255,255,0.9)", bordercolor="#d0d5dd", borderpad=6,
+        )
+
+    coordinates = [
+        coordinate
+        for feature in features
+        for polygon in (
+            [feature["geometry"]["coordinates"]]
+            if feature["geometry"]["type"] == "Polygon"
+            else feature["geometry"]["coordinates"]
+        )
+        for ring in polygon
+        for coordinate in ring
+    ]
+    if coordinates:
+        longitudes = [float(point[0]) for point in coordinates]
+        latitudes = [float(point[1]) for point in coordinates]
+        center = {
+            "lat": (min(latitudes) + max(latitudes)) / 2,
+            "lon": (min(longitudes) + max(longitudes)) / 2,
+        }
+        span = max(max(latitudes) - min(latitudes), max(longitudes) - min(longitudes), 0.1)
+        zoom = max(4.6, min(7.5, 7.0 - math.log2(span)))
+    else:
+        center, zoom = {"lat": 46.6, "lon": 2.4}, 4.5
+    figure.update_layout(
+        template="plotly_white",
+        title="Station period-mean air temperature",
+        height=610,
+        uirevision="department-overview",
+        map=dict(
+            style="carto-positron", center=center, zoom=zoom,
+            uirevision="department-overview",
+        ),
+        margin=dict(l=0, r=0, t=55, b=0),
+        legend=dict(
+            orientation="h", yanchor="top", y=0.99, xanchor="left", x=0.01,
+            bgcolor="rgba(255,255,255,0.88)",
+        ),
     )
     return figure

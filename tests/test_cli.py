@@ -97,17 +97,22 @@ def test_download_removes_verified_redundant_partial(monkeypatch, tmp_path: Path
 def test_dashboard_cli_defaults_and_options(monkeypatch, tmp_path: Path):
     observed = {}
 
-    def run_dashboard(analytics_dir, host, port, debug):
-        observed.update(analytics_dir=analytics_dir, host=host, port=port, debug=debug)
+    def run_dashboard(analytics_dir, geography_dir, host, port, debug):
+        observed.update(
+            analytics_dir=analytics_dir, geography_dir=geography_dir,
+            host=host, port=port, debug=debug,
+        )
 
     monkeypatch.setattr(cli, "run_dashboard", run_dashboard)
     result = cli.run([
         "dashboard", "dash", "--analytics-dir", str(tmp_path),
+        "--geography-dir", str(tmp_path / "geography"),
         "--host", "0.0.0.0", "--port", "9000", "--debug",
     ])
     assert result == 0
     assert observed == {
-        "analytics_dir": tmp_path, "host": "0.0.0.0", "port": 9000, "debug": True,
+        "analytics_dir": tmp_path, "geography_dir": tmp_path / "geography",
+        "host": "0.0.0.0", "port": 9000, "debug": True,
     }
 
 

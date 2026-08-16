@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,7 @@ from .observations import _expressions, _where
 
 
 PARIS = ZoneInfo("Europe/Paris")
+MINIMUM_TEMPERATURE_HOURS_PER_DAY = 18
 
 
 def expected_hours(filters: DashboardFilters) -> int:
@@ -112,4 +113,71 @@ def fetch_station_map(analytics_dir: Path, filters: DashboardFilters) -> pl.Data
             ORDER BY NOM_USUEL, NUM_POSTE
             """,
             [filters.department, filters.department, filters.start_date, filters.end_date, hours],
+        ).pl()
+
+
+def fetch_station_temperature_overview(
+    analytics_dir: Path,
+    start_date: date,
+    end_date: date,
+    time_basis: str = "local",
+    quality_mode: str = "all",
+    minimum_daily_hours: int = MINIMUM_TEMPERATURE_HOURS_PER_DAY,
+) -> pl.DataFrame:
+    """Return station-balanced period temperatures across materialized departments."""
+    if start_date > end_date:
+        raise ValueError("Start date must not be after end date")
+    if not 1 <= minimum_daily_hours <= 25:
+        raise ValueError("Minimum daily hours must be between 1 and 25")
+    if time_basis == "local":
+        day_expression = "local_date"
+    elif time_basis == "utc":
+        day_expression = "CAST(observation_time_utc AT TIME ZONE 'UTC' AS DATE)"
+    else:
+        raise ValueError("Time basis must be local or utc")
+    quality_clause = ""
+    if quality_mode == "exclude_doubtful":
+        quality_clause = " AND (QT IS NULL OR QT <> 2)"
+    elif quality_mode != "all":
+        raise ValueError("Unsupported quality mode")
+
+    with read_connection(analytics_dir) as connection:
+        return connection.execute(
+            f"""
+            WITH eligible_hourly AS (
+                SELECT CAST(department AS VARCHAR) AS department,
+                       NUM_POSTE, NOM_USUEL, LAT, LON, ALTI,
+                       observation_time_utc,
+                       {day_expression} AS observation_date,
+                       T
+                FROM hourly_core
+                WHERE {day_expression} BETWEEN ? AND ?
+                  AND T IS NOT NULL{quality_clause}
+            ), station_days AS (
+                SELECT department, NUM_POSTE, observation_date,
+                       avg(T)::DOUBLE AS daily_mean_temperature,
+                       count(T)::UBIGINT AS valid_hours,
+                       arg_max(NOM_USUEL, observation_time_utc) AS NOM_USUEL,
+                       arg_max(LAT, observation_time_utc) AS LAT,
+                       arg_max(LON, observation_time_utc) AS LON,
+                       arg_max(ALTI, observation_time_utc) AS ALTI,
+                       max(observation_time_utc) AS latest_observation_utc
+                FROM eligible_hourly
+                GROUP BY department, NUM_POSTE, observation_date
+                HAVING count(T) >= ?
+            )
+            SELECT department, NUM_POSTE,
+                   arg_max(NOM_USUEL, latest_observation_utc) AS NOM_USUEL,
+                   arg_max(LAT, latest_observation_utc) AS LAT,
+                   arg_max(LON, latest_observation_utc) AS LON,
+                   arg_max(ALTI, latest_observation_utc) AS ALTI,
+                   avg(daily_mean_temperature)::DOUBLE AS period_mean_temperature,
+                   count(*)::UBIGINT AS qualifying_days,
+                   sum(valid_hours)::UBIGINT AS valid_hours,
+                   max(latest_observation_utc) AS latest_observation_utc
+            FROM station_days
+            GROUP BY department, NUM_POSTE
+            ORDER BY department, NOM_USUEL, NUM_POSTE
+            """,
+            [start_date, end_date, minimum_daily_hours],
         ).pl()

@@ -9,8 +9,21 @@ import pytest
 import weather_analysis.queries.observations as observation_queries
 
 from weather_analysis.queries.connection import validate_catalog
-from weather_analysis.queries.coverage import expected_hours, fetch_coverage_grid, fetch_summary
-from weather_analysis.queries.metadata import available_years, metric_metadata, stations_for_period
+from weather_analysis.queries.coverage import (
+    expected_hours,
+    fetch_coverage_grid,
+    fetch_station_temperature_overview,
+    fetch_summary,
+)
+from weather_analysis.queries.metadata import (
+    available_departments,
+    available_years,
+    best_station_for_period,
+    calendar_year_range,
+    department_has_observations,
+    metric_metadata,
+    stations_for_period,
+)
 from weather_analysis.queries.models import DashboardFilters, QueryLimitError
 from weather_analysis.queries.observations import fetch_historical_comparison, fetch_timeseries
 
@@ -58,6 +71,18 @@ def make_catalog(tmp_path: Path) -> Path:
          "2024-02-29 12:00:00+00", "2024-02-29", 13, 8.0, 1),
         ("44", 2024, "44000000", "TIME-EDGE", 47.00, -1.00, 10,
          "2024-12-31 23:00:00+00", "2025-01-01", 0, 3.0, 1),
+        ("44", 2026, "44020001", "NANTES-BOUGUENAIS", 47.15, -1.61, 26,
+         "2026-07-10 12:00:00+00", "2026-07-10", 14, 21.0, 1),
+        ("35", 2024, "44020001", "RENNES-LONG-HISTORY", 48.11, -1.68, 36,
+         "2024-01-01 00:00:00+00", "2024-01-01", 1, 8.0, 1),
+        ("35", 2026, "44020001", "RENNES-LONG-HISTORY", 48.11, -1.68, 36,
+         "2026-01-01 00:00:00+00", "2026-01-01", 1, 9.0, 1),
+        ("35", 2026, "44020001", "RENNES-LONG-HISTORY", 48.11, -1.68, 36,
+         "2026-06-15 00:00:00+00", "2026-06-15", 2, 20.0, 1),
+        ("35", 2026, "35051001", "RENNES-SHORT-HISTORY", 48.12, -1.64, 42,
+         "2026-01-01 00:00:00+00", "2026-01-01", 1, 9.0, 1),
+        ("35", 2026, "35051001", "RENNES-SHORT-HISTORY", 48.12, -1.64, 42,
+         "2026-06-15 00:00:00+00", "2026-06-15", 2, 20.0, 1),
     ]
     connection.executemany(
         "INSERT INTO hourly_core (department,year,NUM_POSTE,NOM_USUEL,LAT,LON,ALTI,"
@@ -76,8 +101,10 @@ def make_catalog(tmp_path: Path) -> Path:
         "INSERT INTO metrics VALUES (?,?,?)",
         [(name, f"Official {name}", "dictionary.csv") for name in ("T", "TD", "U", "RR1", "FF", "PSTAT")],
     )
-    connection.execute("CREATE TABLE departments (department VARCHAR, name VARCHAR)")
-    connection.execute("INSERT INTO departments VALUES ('44','Loire-Atlantique')")
+    connection.execute("CREATE TABLE departments (department VARCHAR, department_name VARCHAR)")
+    connection.executemany("INSERT INTO departments VALUES (?,?)", [
+        ("44", "Loire-Atlantique"), ("35", "Ille-et-Vilaine"),
+    ])
     connection.close()
     return root
 
@@ -94,6 +121,9 @@ def filters(**changes) -> DashboardFilters:
 
 def test_filter_validation_and_whitelists():
     assert filters().metric_spec.unit == "°C"
+    assert filters(department="35").department == "35"
+    with pytest.raises(ValueError, match="Invalid department"):
+        filters(department="France")
     with pytest.raises(ValueError, match="at most 5"):
         filters(stations=tuple(str(i) for i in range(6)))
     with pytest.raises(ValueError, match="Unsupported metric"):
@@ -105,11 +135,27 @@ def test_filter_validation_and_whitelists():
 def test_catalog_metadata_and_missing_database(tmp_path: Path):
     root = make_catalog(tmp_path)
     assert validate_catalog(root).name == "weather.duckdb"
-    assert available_years(str(root)) == (2025, 2024, 2023, 2020)
+    assert available_departments(str(root)) == (
+        ("35", "Ille-et-Vilaine"), ("44", "Loire-Atlantique"),
+    )
+    assert available_years(str(root), "44") == (2026, 2025, 2024, 2023, 2020)
     assert metric_metadata(str(root))["T"]["description_fr"] == "Official T"
     assert stations_for_period(root, "44", date(2025, 1, 1), date(2025, 1, 1)).height == 3
     with pytest.raises(FileNotFoundError):
         validate_catalog(tmp_path / "missing")
+
+
+def test_department_period_defaults_and_best_station(tmp_path: Path):
+    root = make_catalog(tmp_path)
+    assert calendar_year_range(root, "44", 2026) == (date(2026, 1, 1), date(2026, 7, 10))
+    assert calendar_year_range(root, "44", 2025) == (date(2025, 1, 1), date(2025, 12, 31))
+    assert department_has_observations(root, "35", date(2026, 1, 1), date(2026, 1, 2))
+    assert not department_has_observations(root, "35", date(2023, 1, 1), date(2023, 12, 31))
+    assert best_station_for_period(
+        root, "35", "T", date(2026, 1, 1), date(2026, 12, 31)
+    ) == "44020001"
+    stations = stations_for_period(root, "35", date(2026, 1, 1), date(2026, 12, 31))
+    assert set(stations["NOM_USUEL"]) == {"RENNES-LONG-HISTORY", "RENNES-SHORT-HISTORY"}
 
 
 def test_hourly_daily_and_quality_queries(tmp_path: Path):
@@ -121,6 +167,68 @@ def test_hourly_daily_and_quality_queries(tmp_path: Path):
     assert fetch_timeseries(root, filters(resolution="daily", daily_statistics=("minimum",)))["value"].item() == 4.0
     rain = filters(metric="RR1", resolution="daily", daily_statistics=("total",))
     assert fetch_timeseries(root, rain)["value"].item() == pytest.approx(1.0)
+
+
+def test_station_temperature_overview_uses_qualifying_station_days(tmp_path: Path):
+    root = make_catalog(tmp_path)
+    with duckdb.connect(str(root / "weather.duckdb")) as connection:
+        connection.execute("""
+            INSERT INTO hourly_core (
+                department, year, NUM_POSTE, NOM_USUEL, LAT, LON, ALTI,
+                observation_time_utc, local_date, local_hour, T, QT
+            )
+            SELECT '44', 2025, '44999001', 'QUALIFYING', 47.4, -1.4, 30,
+                   TIMESTAMPTZ '2025-02-01 00:00:00+00' + number * INTERVAL 1 HOUR,
+                   DATE '2025-02-01', number::UTINYINT, 10.0, 1
+            FROM range(18) values(number)
+        """)
+        connection.execute("""
+            INSERT INTO hourly_core (
+                department, year, NUM_POSTE, NOM_USUEL, LAT, LON, ALTI,
+                observation_time_utc, local_date, local_hour, T, QT
+            )
+            SELECT '44', 2025, '44999001', 'QUALIFYING-MOVED', 47.5, -1.3, 35,
+                   TIMESTAMPTZ '2025-02-02 00:00:00+00' + number * INTERVAL 1 HOUR,
+                   DATE '2025-02-02', number::UTINYINT, 20.0, 1
+            FROM range(18) values(number)
+        """)
+        connection.execute("""
+            INSERT INTO hourly_core (
+                department, year, NUM_POSTE, NOM_USUEL, LAT, LON, ALTI,
+                observation_time_utc, local_date, local_hour, T, QT
+            )
+            SELECT '35', 2025, '35999001', 'SPARSE', 48.1, -1.7, 40,
+                   TIMESTAMPTZ '2025-02-01 00:00:00+00' + number * INTERVAL 1 HOUR,
+                   DATE '2025-02-01', number::UTINYINT, 12.0, 1
+            FROM range(17) values(number)
+        """)
+        connection.execute("""
+            INSERT INTO hourly_core (
+                department, year, NUM_POSTE, NOM_USUEL, LAT, LON, ALTI,
+                observation_time_utc, local_date, local_hour, T, QT
+            )
+            SELECT '35', 2025, '35999002', 'DOUBTFUL', 48.2, -1.6, 45,
+                   TIMESTAMPTZ '2025-02-01 00:00:00+00' + number * INTERVAL 1 HOUR,
+                   DATE '2025-02-01', number::UTINYINT, 8.0, 2
+            FROM range(18) values(number)
+        """)
+
+    all_quality = fetch_station_temperature_overview(
+        root, date(2025, 2, 1), date(2025, 2, 2)
+    )
+    qualifying = all_quality.filter(all_quality["NUM_POSTE"] == "44999001").row(0, named=True)
+    assert qualifying["period_mean_temperature"] == pytest.approx(15.0)
+    assert qualifying["qualifying_days"] == 2
+    assert qualifying["valid_hours"] == 36
+    assert qualifying["NOM_USUEL"] == "QUALIFYING-MOVED"
+    assert qualifying["LAT"] == pytest.approx(47.5)
+    assert "35999001" not in all_quality["NUM_POSTE"].to_list()
+    assert "35999002" in all_quality["NUM_POSTE"].to_list()
+
+    filtered = fetch_station_temperature_overview(
+        root, date(2025, 2, 1), date(2025, 2, 2), quality_mode="exclude_doubtful"
+    )
+    assert "35999002" not in filtered["NUM_POSTE"].to_list()
 
 
 def test_daily_query_returns_multiple_selected_statistics(tmp_path: Path):

@@ -4,14 +4,38 @@ from datetime import date, datetime
 
 import polars as pl
 
+from weather_analysis.geography import AdministrativeGeography
 from weather_analysis.queries.models import DashboardFilters
 from weather_analysis.visualization.dash.figures import (
     coverage_heatmap_figure,
     empty_figure,
     historical_comparison_figure,
     station_map_figure,
+    station_temperature_overview_figure,
     time_series_figure,
 )
+
+
+def simple_geography() -> AdministrativeGeography:
+    department = {
+        "type": "Feature",
+        "properties": {"code": "44", "nom": "Loire-Atlantique", "region": "52"},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-2.0, 47.0], [-1.0, 47.0], [-1.0, 48.0],
+                             [-2.0, 48.0], [-2.0, 47.0]]],
+        },
+    }
+    region = {
+        "type": "Feature",
+        "properties": {"code": "52", "nom": "Pays de la Loire"},
+        "geometry": department["geometry"],
+    }
+    return AdministrativeGeography(
+        {"type": "FeatureCollection", "features": [department]},
+        {"type": "FeatureCollection", "features": [region]},
+        {},
+    )
 
 
 def filters(resolution: str = "hourly") -> DashboardFilters:
@@ -45,7 +69,48 @@ def test_heatmap_and_map_figures():
         "last_observation_utc": [datetime(2025, 1, 1)], "period_rows": [1],
         "metric_rows": [1], "coverage": [100.0], "active_in_period": [True],
     })
-    assert station_map_figure(station_map, ("44020001",)).data[0].type == "scattermap"
+    figure = station_map_figure(station_map, ("44020001",), "44")
+    assert figure.data[0].type == "scattermap"
+    assert figure.layout.map.center.lat == 47.2
+    assert figure.layout.map.center.lon == -1.6
+
+    other_department = station_map.with_columns(pl.lit(48.1).alias("LAT"), pl.lit(-1.7).alias("LON"))
+    other_figure = station_map_figure(other_department, ("44020001",), "35")
+    assert other_figure.layout.map.center.lat != figure.layout.map.center.lat
+    assert figure.layout.map.uirevision == "department:44"
+    assert other_figure.layout.map.uirevision == "department:35"
+    assert other_figure.layout.uirevision != figure.layout.uirevision
+
+
+def test_station_temperature_overview_shares_scale_and_keeps_exact_markers():
+    stations = pl.DataFrame({
+        "department": ["44", "44"], "NUM_POSTE": ["A", "B"],
+        "NOM_USUEL": ["Alpha", "Beta"], "LAT": [47.2, 47.7],
+        "LON": [-1.8, -1.2], "ALTI": [10, 20],
+        "period_mean_temperature": [8.0, 12.0],
+        "qualifying_days": [2, 3], "valid_hours": [40, 60],
+    })
+    surface = pl.DataFrame({
+        "LAT": [47.4], "LON": [-1.5], "temperature": [10.0],
+    })
+    figure = station_temperature_overview_figure(
+        stations, surface, simple_geography(), ("44",), True
+    )
+    assert [trace.type for trace in figure.data] == [
+        "choroplethmap", "scattermap", "scattermap",
+    ]
+    assert figure.data[1].marker.coloraxis == "coloraxis"
+    assert figure.data[2].marker.coloraxis == "coloraxis"
+    assert "Qualifying days" in figure.data[2].hovertemplate
+    assert figure.layout.coloraxis.cmin == 8.0
+    assert figure.layout.coloraxis.cmax == 12.0
+
+    markers_only = station_temperature_overview_figure(
+        stations, surface, simple_geography(), ("44",), False
+    )
+    assert [trace.name for trace in markers_only.data] == [
+        "Materialized departments", "Measured stations",
+    ]
 
 
 def test_daily_average_minimum_and_maximum_have_distinct_visual_cues():
